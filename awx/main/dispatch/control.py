@@ -3,6 +3,7 @@ import socket
 
 from django.conf import settings
 
+from awx.main.dispatch import get_local_queuename
 from kombu import Connection, Queue, Exchange, Producer, Consumer
 
 logger = logging.getLogger('awx.main.dispatch')
@@ -16,17 +17,14 @@ class Control(object):
         if service not in self.services:
             raise RuntimeError('{} must be in {}'.format(service, self.services))
         self.service = service
-        self.queue = Queue(
-            '{}-rpc'.format(service),
-            Exchange('{}-rpc'.format(service), type='direct'),
-            routing_key='request-{}'.format(settings.CLUSTER_HOST_ID)
-        )
+        queuename = get_local_queuename()
+        self.queue = Queue(queuename, Exchange(queuename), routing_key=queuename)
 
     def publish(self, msg, conn, host, **kwargs):
         producer = Producer(
             exchange=self.queue.exchange,
             channel=conn,
-            routing_key='request-{}'.format(host)
+            routing_key=get_local_queuename()
         )
         producer.publish(msg, expiration=5, **kwargs)
 

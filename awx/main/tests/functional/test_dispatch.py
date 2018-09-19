@@ -149,6 +149,29 @@ class TestAutoScaling:
         assert self.pool.full is True
         assert len(self.pool) == 10
 
+    def test_equal_worker_distribution(self):
+        # if all workers are busy, spawn new workers *before* adding messages
+        # to an existing queue
+        self.pool.init_workers(SlowResultWriter().work_loop, multiprocessing.Queue)
+
+        # start with two workers, write an event to each worker and make it busy
+        assert len(self.pool) == 2
+        for i in range(10):
+            self.pool.write(0, 'Hello, World!')
+        assert len(self.pool) == 10
+        for w in self.pool.workers:
+            assert w.busy
+            assert len(w.managed_tasks) == 1
+
+        # the queue is full at 10, the _next_ write should put the message into
+        # a worker's backlog
+        assert len(self.pool) == 10
+        for w in self.pool.workers:
+            assert w.messages_sent == 1
+        self.pool.write(0, 'Hello, World!')
+        assert len(self.pool) == 10
+        assert self.pool.workers[0].messages_sent == 2
+
     def test_lost_worker_autoscale(self):
         # if a worker exits, it should be replaced automatically up to min_workers
         self.pool.init_workers(ResultWriter().work_loop, multiprocessing.Queue())
@@ -170,15 +193,15 @@ class TestAutoScaling:
         assert len(self.pool) == 2
 
     def test_lost_worker_queue_durability(self):
-        # if a worker exits, any unacked messages in its queue should finish
+        # if a worker exits, any unacked messages in its backlog should finish
+        self.pool.min_workers = 1
         self.pool.init_workers(SlowResultWriter().work_loop, multiprocessing.Queue())
 
-        # start two workers, give one some tasks, kill the worker
-        assert len(self.pool) == 2
+        # start a worker, give one some tasks, kill the worker
+        assert len(self.pool) == 1
         for i in range(3):
-            self.pool.write(0, 'Hello, Worker {}'.format(i))
+            self.pool.workers[0].put('Hello, Worker {}'.format(i))
         assert self.pool.workers[0].messages_sent == 3
-        assert self.pool.workers[1].messages_sent == 0
         self.pool.workers[0].process.terminate()
         time.sleep(1)  # wait a moment for sigterm
 

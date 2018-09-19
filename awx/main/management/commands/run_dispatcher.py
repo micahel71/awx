@@ -13,7 +13,7 @@ from kombu import Connection, Exchange, Queue
 from awx.main.dispatch import get_local_queuename, reaper
 from awx.main.dispatch.control import Control
 from awx.main.dispatch.pool import AutoscalePool
-from awx.main.dispatch.worker import AWXConsumer, TaskWorker, LeastBusyStrategy
+from awx.main.dispatch.worker import AWXConsumer, TaskWorker
 
 logger = logging.getLogger('awx.main.dispatch')
 
@@ -104,14 +104,12 @@ class Command(BaseCommand):
                         reply=True
                     )
                 )
-                queues.append(Control('dispatcher').queue)
                 consumer = AWXConsumer(
                     'dispatcher',
                     conn,
                     TaskWorker(),
                     queues,
-                    AutoscalePool(min_workers=4),
-                    strategy=LeastBusyStrategy
+                    AutoscalePool(min_workers=4)
                 )
                 consumer.run()
             except KeyboardInterrupt:

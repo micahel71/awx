@@ -4,7 +4,6 @@
 import os
 import logging
 import signal
-import sys
 from uuid import UUID
 from Queue import Empty as QueueEmpty
 
@@ -33,53 +32,14 @@ class WorkerSignalHandler:
         self.kill_now = True
 
 
-class RoundRobinStrategy(object):
-    '''
-    Distribute messages based on int(UUID) % total_workers
-    This is used for callback event delivery, where we want to dispatch *as
-    fast as possible*, but don't care as much about even distribution amongst
-    the worker processes (because each event is handle very quickly).
-    '''
-
-    def schedule(self, consumer, body, message):
-        if "uuid" in body and body['uuid']:
-            try:
-                queue = UUID(body['uuid']).int % len(consumer.pool)
-            except Exception:
-                queue = consumer.total_messages % len(consumer.pool)
-        else:
-            queue = consumer.total_messages % len(consumer.pool)
-        return queue
-
-
-class LeastBusyStrategy(object):
-    '''
-    Attempt to deliver messages to the *least busy* worker (the worker with the
-    shortest work queue).
-    This is used for task dispatch, where we want to schedule *evenly* to run
-    as many simultaneous tasks as possible (ideally, each worker _never_ has
-    a message backlog).
-    '''
-
-    def schedule(self, consumer, body, message):
-        queue = 0
-        size = sys.maxint
-        for i, worker in enumerate(consumer.pool.workers):
-            if len(worker.managed_tasks) < size:
-                queue = i
-                size = len(worker.managed_tasks)
-        return queue
-
-
 class AWXConsumer(ConsumerMixin):
 
-    def __init__(self, name, connection, worker, queues=[], pool=None, strategy=RoundRobinStrategy):
+    def __init__(self, name, connection, worker, queues=[], pool=None):
         self.connection = connection
         self.total_messages = 0
         self.queues = queues
         self.worker = worker
         self.pool = pool
-        self.strategy = strategy()
         if pool is None:
             self.pool = WorkerPool()
         self.pool.init_workers(self.worker.work_loop)
@@ -107,7 +67,16 @@ class AWXConsumer(ConsumerMixin):
     def process_task(self, body, message):
         if 'control' in body:
             return self.control(body, message)
-        queue = self.strategy.schedule(self, body, message)
+        if len(self.pool):
+            if "uuid" in body and body['uuid']:
+                try:
+                    queue = UUID(body['uuid']).int % len(self.pool)
+                except Exception:
+                    queue = self.total_messages % len(self.pool)
+            else:
+                queue = self.total_messages % len(self.pool)
+        else:
+            queue = 0
         self.pool.write(queue, body)
         self.total_messages += 1
         message.ack()

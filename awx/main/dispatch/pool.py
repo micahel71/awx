@@ -355,5 +355,12 @@ class AutoscalePool(WorkerPool):
         if isinstance(body, dict) and 'cluster_node_heartbeat' in body['task']:
             self.cleanup()
         if self.should_grow:
-            preferred_queue, _ = self.up()
-        return super(AutoscalePool, self).write(preferred_queue, body)
+            self.up()
+        # we don't care about "preferred queue" round robin distribution, just
+        # find the first non-busy worker and claim it
+        for w in self.workers:
+            if not w.busy:
+                w.put(body)
+                break
+        else:
+            return super(AutoscalePool, self).write(preferred_queue, body)
