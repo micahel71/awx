@@ -120,6 +120,10 @@ def inform_cluster_of_shutdown():
         this_inst = Instance.objects.get(hostname=settings.CLUSTER_HOST_ID)
         this_inst.capacity = 0  # No thank you to new jobs while shut down
         this_inst.save(update_fields=['capacity', 'modified'])
+        try:
+            reaper.reap(this_inst)
+        except Exception:
+            logger.exception('failed to reap jobs for {}'.format(this_inst.hostname))
         logger.warning(six.text_type('Normal shutdown signal for instance {}, '
                        'removed self from capacity pool.').format(this_inst.hostname))
     except Exception:
@@ -355,6 +359,10 @@ def cluster_node_heartbeat():
             raise RuntimeError("Shutting down.")
     for other_inst in lost_instances:
         try:
+            reaper.reap(other_inst)
+        except Exception:
+            logger.exception('failed to reap jobs for {}'.format(other_inst.hostname))
+        try:
             # Capacity could already be 0 because:
             #  * It's a new node and it never had a heartbeat
             #  * It was set to 0 by another tower node running this method
@@ -367,10 +375,6 @@ def cluster_node_heartbeat():
                 other_inst.save(update_fields=['capacity'])
                 logger.error(six.text_type("Host {} last checked in at {}, marked as lost.").format(
                     other_inst.hostname, other_inst.modified))
-                try:
-                    reaper.reap(other_inst)
-                except Exception:
-                    logger.exception('failed to reap jobs for {}'.format(other_inst.hostname))
             elif settings.AWX_AUTO_DEPROVISION_INSTANCES:
                 deprovision_hostname = other_inst.hostname
                 other_inst.delete()
