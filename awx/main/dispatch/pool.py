@@ -358,7 +358,9 @@ class AutoscalePool(WorkerPool):
             self.up()
         # we don't care about "preferred queue" round robin distribution, just
         # find the first non-busy worker and claim it
-        for w in self.workers:
+        workers = self.workers[:]
+        random.shuffle(workers)
+        for w in workers:
             if not w.busy:
                 w.put(body)
                 break
