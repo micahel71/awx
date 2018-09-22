@@ -1,10 +1,30 @@
 ---
+- block:
+  - name: get docker networks
+    shell: "docker network ls --filter name={{ dockernetwork }} -q"
+    register: dockernetworks  
+  - name: create docker network
+    shell: "docker network create -d bridge {{ dockernetwork }}"
+    when: dockernetworks.stdout == ''
+  - name: set dockernetwork settings if true
+    set_fact:
+      net_purge: true
+      net_name: "{{ dockernetwork }}"
+  when: dockernetwork is defined
+- name: set dockernetwork settings if false
+  set_fact:
+    net_purge: false
+    net_name: "bridge"
+  when: dockernetwork is not defined
 - name: Activate postgres container
   docker_container:
     name: postgres
     state: started
     restart_policy: unless-stopped
     image: postgres:9.6
+    purge_networks: "{{ net_purge }}"
+    networks:
+    - name: "{{ net_name }}"
     volumes:
       - "{{ postgres_data_dir }}:/var/lib/postgresql/data:Z"
     env:
@@ -21,6 +41,9 @@
     state: started
     restart_policy: unless-stopped
     image: "{{ rabbitmq_image }}"
+    purge_networks: "{{ net_purge }}"
+    networks:
+    - name: "{{ net_name }}"
     env:
       RABBITMQ_DEFAULT_VHOST: "awx"
       RABBITMQ_ERLANG_COOKIE: "cookiemonster"
@@ -32,6 +55,9 @@
     state: started
     restart_policy: unless-stopped
     image: memcached:alpine
+    purge_networks: "{{ net_purge }}"
+    networks:
+    - name: "{{ net_name }}"
 
 - name: Wait for postgres and rabbitmq to activate
   pause:
@@ -92,6 +118,9 @@
     hostname: awxweb
     dns_search_domains: "{{ awx_container_search_domains.split(',') if awx_container_search_domains is defined else omit }}"
     dns_servers: "{{ awx_alternate_dns_servers.split(',') if awx_alternate_dns_servers is defined else omit }}"
+    purge_networks: "{{ net_purge }}"
+    networks:
+    - name: "{{ net_name }}"
     env:
       http_proxy: "{{ http_proxy | default('') }}"
       https_proxy: "{{ https_proxy | default('') }}"
@@ -128,6 +157,9 @@
     hostname: awx
     dns_search_domains: "{{ awx_container_search_domains.split(',') if awx_container_search_domains is defined else omit }}"
     dns_servers: "{{ awx_alternate_dns_servers.split(',') if awx_alternate_dns_servers is defined else omit }}"
+    purge_networks: "{{ net_purge }}"
+    networks:
+    - name: "{{ net_name }}"
     env:
       http_proxy: "{{ http_proxy | default('') }}"
       https_proxy: "{{ https_proxy | default('') }}"
