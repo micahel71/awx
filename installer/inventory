@@ -113,6 +113,6 @@ project_data_dir=/var/lib/awx/projects
 # NOTE: only obeyed in local_docker install
 #ca_trust_dir=/etc/ssl/certs
 
-# comment
+# comment 1
 dockernetwork=awxnet
 
