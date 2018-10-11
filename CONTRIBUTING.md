@@ -86,8 +86,8 @@ If you're not using Docker for Mac, or Docker for Windows, you may need, or choo
 
 The AWX UI requires the following:
 
-- Node 6.x LTS version
-- NPM 3.x LTS
+- Node 8.x LTS
+- NPM 6.x LTS
 
 ### Build the environment
 
@@ -329,7 +329,7 @@ We like to keep our commit history clean, and will require resubmission of pull 
 
 Sometimes it might take us a while to fully review your PR. We try to keep the `devel` branch in good working order, and so we review requests carefully. Please be patient.
 
-All submitted PRs will have the linter and unit tests run against them, and the status reported in the PR.
+All submitted PRs will have the linter and unit tests run against them via Zuul, and the status reported in the PR.
 
 ## Reporting Issues
 
