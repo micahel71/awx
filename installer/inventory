@@ -11,6 +11,7 @@ dockerhub_version=1.0.8
 
 # Openshift Install
 # Will need to set -e openshift_password=developer -e docker_registry_password=$(oc whoami -t)
+#           or set -e openshift_token=TOKEN
 # openshift_host=127.0.0.1:8443
 # openshift_project=awx
 # openshift_user=developer
@@ -33,6 +34,8 @@ dockerhub_version=1.0.8
 # task_mem_request=2
 
 # Common Docker parameters
+awx_task_hostname=awx
+awx_web_hostname=awxweb
 postgres_data_dir=/var/lib/pgdocker
 host_port=8081
 
@@ -115,7 +118,13 @@ project_data_dir=/var/lib/awx/projects
 # this variable causes this directory on the host to be bind mounted over
 # /etc/pki/ca-trust in the awx_task and awx_web containers.
 # NOTE: only obeyed in local_docker install
-#ca_trust_dir=/etc/ssl/certs
+ca_trust_dir=/etc/pki/ca-trust
+
+# Include /etc/nginx/awx_extra.conf
+# Note the use of glob pattern for nginx
+# which makes include "optional" - i.e. not fail
+# if file is absent
+#extra_nginx_include="/etc/nginx/awx_extra[.]conf"
 
 # comment 1
 dockernetwork=awxnet
