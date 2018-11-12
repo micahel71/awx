@@ -26,6 +26,7 @@ from awx.main.models import (
     ProjectUpdate,
     SystemJob,
     WorkflowJob,
+    WorkflowJobTemplate
 )
 from awx.main.scheduler.dag_workflow import WorkflowDAG
 from awx.main.utils.pglock import advisory_lock
@@ -103,8 +104,15 @@ class TaskManager():
 
     def spawn_workflow_graph_jobs(self, workflow_jobs):
         for workflow_job in workflow_jobs:
+            if workflow_job.cancel_flag:
+                logger.debug('Not spawning jobs for %s because it is pending cancelation.', workflow_job.log_format)
+                continue
             dag = WorkflowDAG(workflow_job)
             spawn_nodes = dag.bfs_nodes_to_run()
+            if spawn_nodes:
+                logger.info('Spawning jobs for %s', workflow_job.log_format)
+            else:
+                logger.debug('No nodes to spawn for %s', workflow_job.log_format)
             for spawn_node in spawn_nodes:
                 if spawn_node.unified_job_template is None:
                     continue
@@ -112,41 +120,68 @@ class TaskManager():
                 job = spawn_node.unified_job_template.create_unified_job(**kv)
                 spawn_node.job = job
                 spawn_node.save()
-                if job._resources_sufficient_for_launch():
-                    can_start = job.signal_start()
-                    if not can_start:
-                        job.job_explanation = _("Job spawned from workflow could not start because it "
-                                                "was not in the right state or required manual credentials")
-                else:
+                logger.info('Spawned %s in %s for node %s', job.log_format, workflow_job.log_format, spawn_node.pk)
+                can_start = True
+                if isinstance(spawn_node.unified_job_template, WorkflowJobTemplate):
+                    workflow_ancestors = job.get_ancestor_workflows()
+                    if spawn_node.unified_job_template in set(workflow_ancestors):
+                        can_start = False
+                        logger.info('Refusing to start recursive workflow-in-workflow id={}, wfjt={}, ancestors={}'.format(
+                            job.id, spawn_node.unified_job_template.pk, [wa.pk for wa in workflow_ancestors]))
+                        display_list = [spawn_node.unified_job_template] + workflow_ancestors
+                        job.job_explanation = _(
+                            "Workflow Job spawned from workflow could not start because it "
+                            "would result in recursion (spawn order, most recent first: {})"
+                        ).format(six.text_type(', ').join([six.text_type('<{}>').format(tmp) for tmp in display_list]))
+                    else:
+                        logger.debug('Starting workflow-in-workflow id={}, wfjt={}, ancestors={}'.format(
+                            job.id, spawn_node.unified_job_template.pk, [wa.pk for wa in workflow_ancestors]))
+                if not job._resources_sufficient_for_launch():
                     can_start = False
                     job.job_explanation = _("Job spawned from workflow could not start because it "
                                             "was missing a related resource such as project or inventory")
+                if can_start:
+                    if workflow_job.start_args:
+                        start_args = json.loads(decrypt_field(workflow_job, 'start_args'))
+                    else:
+                        start_args = {}
+                    can_start = job.signal_start(**start_args)
+                    if not can_start:
+                        job.job_explanation = _("Job spawned from workflow could not start because it "
+                                                "was not in the right state or required manual credentials")
                 if not can_start:
                     job.status = 'failed'
                     job.save(update_fields=['status', 'job_explanation'])
-                    connection.on_commit(lambda: job.websocket_emit_status('failed'))
+                    job.websocket_emit_status('failed')
 
                 # TODO: should we emit a status on the socket here similar to tasks.py awx_periodic_scheduler() ?
                 #emit_websocket_notification('/socket.io/jobs', '', dict(id=))
 
-    # See comment in tasks.py::RunWorkflowJob::run()
     def process_finished_workflow_jobs(self, workflow_jobs):
         result = []
         for workflow_job in workflow_jobs:
             dag = WorkflowDAG(workflow_job)
             if workflow_job.cancel_flag:
-                workflow_job.status = 'canceled'
-                workflow_job.save()
-                dag.cancel_node_jobs()
-                connection.on_commit(lambda: workflow_job.websocket_emit_status(workflow_job.status))
+                logger.debug('Canceling spawned jobs of %s due to cancel flag.', workflow_job.log_format)
+                cancel_finished = dag.cancel_node_jobs()
+                if cancel_finished:
+                    logger.info('Marking %s as canceled, all spawned jobs have concluded.', workflow_job.log_format)
+                    workflow_job.status = 'canceled'
+                    workflow_job.start_args = ''  # blank field to remove encrypted passwords
+                    workflow_job.save(update_fields=['status', 'start_args'])
+                    workflow_job.websocket_emit_status(workflow_job.status)
             else:
                 is_done, has_failed = dag.is_workflow_done()
                 if not is_done:
                     continue
+                logger.info('Marking %s as %s.', workflow_job.log_format, 'failed' if has_failed else 'successful')
                 result.append(workflow_job.id)
-                workflow_job.status = 'failed' if has_failed else 'successful'
-                workflow_job.save()
-                connection.on_commit(lambda: workflow_job.websocket_emit_status(workflow_job.status))
+                new_status = 'failed' if has_failed else 'successful'
+                logger.debug(six.text_type("Transitioning {} to {} status.").format(workflow_job.log_format, new_status))
+                workflow_job.status = new_status
+                workflow_job.start_args = ''  # blank field to remove encrypted passwords
+                workflow_job.save(update_fields=['status', 'start_args'])
+                workflow_job.websocket_emit_status(workflow_job.status)
         return result
 
     def get_dependent_jobs_for_inv_and_proj_update(self, job_obj):
@@ -212,7 +247,6 @@ class TaskManager():
                 self.consume_capacity(task, rampart_group.name)
 
         def post_commit():
-            task.websocket_emit_status(task.status)
             if task.status != 'failed' and type(task) is not WorkflowJob:
                 task_cls = task._get_task_class()
                 task_cls.apply_async(
@@ -231,6 +265,7 @@ class TaskManager():
                     }],
                 )
 
+        task.websocket_emit_status(task.status)  # adds to on_commit
         connection.on_commit(post_commit)
 
     def process_running_tasks(self, running_tasks):
@@ -408,7 +443,7 @@ class TaskManager():
                 logger.debug(six.text_type("Dependent {} couldn't be scheduled on graph, waiting for next cycle").format(task.log_format))
 
     def process_pending_tasks(self, pending_tasks):
-        running_workflow_templates = set([wf.workflow_job_template_id for wf in self.get_running_workflow_jobs()])
+        running_workflow_templates = set([wf.unified_job_template_id for wf in self.get_running_workflow_jobs()])
         for task in pending_tasks:
             self.process_dependencies(task, self.generate_dependencies(task))
             if self.is_job_blocked(task):
@@ -418,12 +453,12 @@ class TaskManager():
             found_acceptable_queue = False
             idle_instance_that_fits = None
             if isinstance(task, WorkflowJob):
-                if task.workflow_job_template_id in running_workflow_templates:
+                if task.unified_job_template_id in running_workflow_templates:
                     if not task.allow_simultaneous:
                         logger.debug(six.text_type("{} is blocked from running, workflow already running").format(task.log_format))
                         continue
                 else:
-                    running_workflow_templates.add(task.workflow_job_template_id)
+                    running_workflow_templates.add(task.unified_job_template_id)
                 self.start_task(task, None, task.get_jobs_fail_chain(), None)
                 continue
             for rampart_group in preferred_instance_groups:
@@ -498,6 +533,14 @@ class TaskManager():
 
             running_workflow_tasks = self.get_running_workflow_jobs()
             finished_wfjs = self.process_finished_workflow_jobs(running_workflow_tasks)
+
+            previously_running_workflow_tasks = running_workflow_tasks
+            running_workflow_tasks = []
+            for workflow_job in previously_running_workflow_tasks:
+                if workflow_job.status == 'running':
+                    running_workflow_tasks.append(workflow_job)
+                else:
+                    logger.debug('Removed %s from job spawning consideration.', workflow_job.log_format)
 
             self.spawn_workflow_graph_jobs(running_workflow_tasks)
 

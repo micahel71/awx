@@ -262,7 +262,6 @@ MIDDLEWARE_CLASSES = (  # NOQA
     'awx.sso.middleware.SocialAuthMiddleware',
     'crum.CurrentRequestUserMiddleware',
     'awx.main.middleware.URLModificationMiddleware',
-    'awx.main.middleware.DeprecatedAuthTokenMiddleware',
     'awx.main.middleware.SessionTimeoutMiddleware',
 )
 
@@ -1142,6 +1141,7 @@ LOGGING = {
         },
         'awx.main.commands.run_callback_receiver': {
             'handlers': ['callback_receiver'],
+            'level': 'INFO'  # in debug mode, includes full callback data
         },
         'awx.main.dispatch': {
             'handlers': ['dispatcher'],

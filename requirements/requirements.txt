@@ -4,8 +4,7 @@
 #
 #    pip-compile --output-file requirements/requirements.txt requirements/requirements.in
 #
-amqp==1.4.9               # via kombu
-anyjson==0.3.3            # via kombu
+amqp==2.3.2               # via kombu
 appdirs==1.4.2
 argparse==1.4.0           # via uwsgitop
 asgi-amqp==1.1.2
@@ -15,17 +14,15 @@ attrs==17.4.0             # via automat, service-identity
 autobahn==18.3.1          # via daphne
 automat==0.6.0            # via twisted
 backports.functools-lru-cache==1.5  # via jaraco.functools
-backports.ssl-match-hostname==3.5.0.1
 baron==0.6.6              # via redbaron
-billiard==3.3.0.23        # via celery
+billiard==3.5.0.4         # via celery
 boto==2.47.0
-celery==3.1.25
+celery==4.2.1
 cffi==1.11.5              # via cryptography
 channels==1.1.8
 constantly==15.1.0        # via twisted
-cryptography==2.1.4       # via pyopenssl, requests
+cryptography==2.3.1       # via requests
 daphne==1.3.0
-decorator==4.2.1
 defusedxml==0.4.1         # via python-saml
 django-auth-ldap==1.2.8
 django-crum==0.7.2
@@ -38,9 +35,10 @@ django-radius==1.1.0
 django-solo==1.1.3
 django-split-settings==0.3.0
 django-taggit==0.22.2
-django==1.11.11
+django==1.11.16
 djangorestframework-yaml==1.0.3
 djangorestframework==3.7.7
+docutils==0.14            # via botocore
 enum34==1.1.6             # via cryptography
 functools32==3.2.3.post2  # via jsonschema
 futures==3.2.0            # via requests-futures
@@ -60,9 +58,8 @@ jaraco.stream==1.1.2      # via irc
 jaraco.text==1.10         # via irc, jaraco.collections
 jsonpickle==0.9.6         # via asgi-amqp
 jsonschema==2.6.0
-kombu==3.0.37             # via asgi-amqp, celery
+kombu==4.2.1              # via asgi-amqp, celery
 lxml==4.2.3
-m2crypto==0.29.0
 markdown==2.6.11
 more-itertools==4.1.0     # via irc, jaraco.functools, jaraco.itertools
 msgpack-python==0.5.5     # via asgi-amqp
@@ -76,10 +73,8 @@ ptyprocess==0.5.2         # via pexpect
 pyasn1-modules==0.2.1     # via service-identity
 pyasn1==0.4.2             # via pyasn1-modules, service-identity
 pycparser==2.18           # via cffi
-pycrypto==2.6.1
 pygerduty==0.37.0
 pyjwt==1.6.0              # via social-auth-core, twilio
-pyopenssl==17.5.0
 pyparsing==2.2.0
 pyrad==1.2                # via django-radius
 python-dateutil==2.7.2
@@ -89,7 +84,7 @@ python-memcached==1.59
 python-openid==2.2.5      # via social-auth-core
 python-radius==1.0
 python-saml==2.4.0
-pytz==2018.3              # via celery, django, irc, tempora, twilio
+pytz==2018.5              # via celery, django, irc, tempora, twilio
 pyyaml==3.12              # via djangorestframework-yaml
 redbaron==0.6.3
 requests-futures==0.9.7
@@ -98,7 +93,7 @@ requests[security]==2.15.1
 rply==0.7.5               # via baron
 service-identity==17.0.0
 simplejson==3.13.2        # via uwsgitop
-six==1.11.0               # via asgi-amqp, asgiref, autobahn, automat, cryptography, django-extensions, irc, isodate, jaraco.classes, jaraco.collections, jaraco.itertools, jaraco.logging, jaraco.stream, more-itertools, pygerduty, pyopenssl, pyrad, python-dateutil, python-memcached, slackclient, social-auth-app-django, social-auth-core, tacacs-plus, tempora, twilio, txaio, websocket-client
+six==1.11.0               # via asgi-amqp, asgiref, autobahn, automat, cryptography, django-extensions, irc, isodate, jaraco.classes, jaraco.collections, jaraco.itertools, jaraco.logging, jaraco.stream, more-itertools, pygerduty, pyrad, python-dateutil, python-memcached, slackclient, social-auth-app-django, social-auth-core, tacacs-plus, tempora, twilio, txaio, websocket-client
 slackclient==1.1.2
 social-auth-app-django==2.1.0
 social-auth-core==1.7.0
@@ -107,11 +102,10 @@ tempora==1.10             # via irc, jaraco.logging
 twilio==6.10.4
 twisted==17.9.0           # via daphne
 txaio==2.9.0              # via autobahn
-typing==3.6.4             # via django-extensions, m2crypto
+typing==3.6.4             # via django-extensions
 uwsgi==2.0.17
 uwsgitop==0.10.0
 websocket-client==0.47.0  # via slackclient
-xmltodict==0.11.0
 zope.interface==4.4.3     # via twisted
 
 # The following packages are considered to be unsafe in a requirements file:

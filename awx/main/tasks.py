@@ -251,6 +251,24 @@ def handle_setting_changes(setting_keys):
     cache.delete_many(cache_keys)
 
 
+@task(queue='tower_broadcast_all', exchange_type='fanout')
+def delete_project_files(project_path):
+    # TODO: possibly implement some retry logic
+    lock_file = project_path + '.lock'
+    if os.path.exists(project_path):
+        try:
+            shutil.rmtree(project_path)
+            logger.info(six.text_type('Success removing project files {}').format(project_path))
+        except Exception:
+            logger.exception(six.text_type('Could not remove project directory {}').format(project_path))
+    if os.path.exists(lock_file):
+        try:
+            os.remove(lock_file)
+            logger.debug(six.text_type('Success removing {}').format(lock_file))
+        except Exception:
+            logger.exception(six.text_type('Could not remove lock file {}').format(lock_file))
+
+
 @task()
 def send_notifications(notification_list, job_id=None):
     if not isinstance(notification_list, list):
@@ -566,7 +584,7 @@ def update_host_smart_inventory_memberships():
 
 
 @task()
-def delete_inventory(inventory_id, user_id):
+def delete_inventory(inventory_id, user_id, retries=5):
     # Delete inventory as user
     if user_id is None:
         user = None
@@ -591,7 +609,9 @@ def delete_inventory(inventory_id, user_id):
             return
         except DatabaseError:
             logger.exception('Database error deleting inventory {}, but will retry.'.format(inventory_id))
-            # TODO: self.retry(countdown=10)
+            if retries > 0:
+                time.sleep(10)
+                delete_inventory(inventory_id, user_id, retries=retries - 1)
 
 
 def with_path_cleanup(f):
@@ -805,7 +825,12 @@ class BaseTask(object):
         return False
 
     def build_inventory(self, instance, **kwargs):
-        json_data = json.dumps(instance.inventory.get_script_data(hostvars=True))
+        script_params = dict(hostvars=True)
+        if hasattr(instance, 'job_slice_number'):
+            script_params['slice_number'] = instance.job_slice_number
+            script_params['slice_count'] = instance.job_slice_count
+        script_data = instance.inventory.get_script_data(**script_params)
+        json_data = json.dumps(script_data)
         handle, path = tempfile.mkstemp(dir=kwargs.get('private_data_dir', None))
         f = os.fdopen(handle, 'w')
         f.write('#! /usr/bin/env python\n# -*- coding: utf-8 -*-\nprint %r\n' % json_data)
@@ -1207,9 +1232,7 @@ class RunJob(BaseTask):
         # Set environment variables for cloud credentials.
         cred_files = kwargs.get('private_data_files', {}).get('credentials', {})
         for cloud_cred in job.cloud_credentials:
-            if cloud_cred and cloud_cred.kind == 'gce':
-                env['GCE_PEM_FILE_PATH'] = cred_files.get(cloud_cred, '')
-            elif cloud_cred and cloud_cred.kind == 'openstack':
+            if cloud_cred and cloud_cred.kind == 'openstack':
                 env['OS_CLIENT_CONFIG_FILE'] = cred_files.get(cloud_cred, '')
 
         for network_cred in job.network_credentials:
@@ -1780,10 +1803,6 @@ class RunInventoryUpdate(BaseTask):
         """
         private_data = {'credentials': {}}
         credential = inventory_update.get_cloud_credential()
-        # If this is GCE, return the RSA key
-        if inventory_update.source == 'gce':
-            private_data['credentials'][credential] = decrypt_field(credential, 'ssh_key_data')
-            return private_data
 
         if inventory_update.source == 'openstack':
             openstack_auth = dict(auth_url=credential.host,
@@ -2016,7 +2035,6 @@ class RunInventoryUpdate(BaseTask):
             'ec2': 'EC2_INI_PATH',
             'vmware': 'VMWARE_INI_PATH',
             'azure_rm': 'AZURE_INI_PATH',
-            'gce': 'GCE_PEM_FILE_PATH',
             'openstack': 'OS_CLIENT_CONFIG_FILE',
             'satellite6': 'FOREMAN_INI_PATH',
             'cloudforms': 'CLOUDFORMS_INI_PATH'

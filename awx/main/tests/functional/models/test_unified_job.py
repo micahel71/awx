@@ -1,11 +1,16 @@
 import itertools
 import pytest
+import six
 
 # Django
 from django.contrib.contenttypes.models import ContentType
 
 # AWX
-from awx.main.models import UnifiedJobTemplate, Job, JobTemplate, WorkflowJobTemplate, Project, WorkflowJob, Schedule
+from awx.main.models import (
+    UnifiedJobTemplate, Job, JobTemplate, WorkflowJobTemplate,
+    Project, WorkflowJob, Schedule,
+    Credential
+)
 
 
 @pytest.mark.django_db
@@ -53,15 +58,28 @@ class TestCreateUnifiedJob:
         job_with_links.save()
         job_with_links.credentials.add(machine_credential)
         job_with_links.credentials.add(net_credential)
-        with mocker.patch('awx.main.models.unified_jobs.UnifiedJobTemplate._get_unified_job_field_names',
-                          return_value=['inventory', 'credential', 'limit']):
-            second_job = job_with_links.copy_unified_job()
+        second_job = job_with_links.copy_unified_job()
 
         # Check that job data matches the original variables
         assert second_job.credential == job_with_links.credential
         assert second_job.inventory == job_with_links.inventory
         assert second_job.limit == 'my_server'
         assert net_credential in second_job.credentials.all()
+
+    def test_job_relaunch_modifed_jt(self, jt_linked):
+        # Replace all credentials with a new one of same type
+        new_creds = []
+        for cred in jt_linked.credentials.all():
+            new_creds.append(Credential.objects.create(
+                name=six.text_type(cred.name) + six.text_type('_new'),
+                credential_type=cred.credential_type,
+                inputs=cred.inputs
+            ))
+        job = jt_linked.create_unified_job()
+        jt_linked.credentials.clear()
+        jt_linked.credentials.add(*new_creds)
+        relaunched_job = job.copy_unified_job()
+        assert set(relaunched_job.credentials.all()) == set(new_creds)
 
 
 @pytest.mark.django_db
@@ -134,3 +152,50 @@ def test_event_processing_not_finished():
 def test_event_model_undefined():
     wj = WorkflowJob.objects.create(name='foobar', status='finished')
     assert wj.event_processing_finished
+
+
+@pytest.mark.django_db
+class TestTaskImpact:
+    @pytest.fixture
+    def job_host_limit(self, job_template, inventory):
+        def r(hosts, forks):
+            for i in range(hosts):
+                inventory.hosts.create(name='foo' + str(i))
+            job = Job.objects.create(
+                name='fake-job',
+                launch_type='workflow',
+                job_template=job_template,
+                inventory=inventory,
+                forks=forks
+            )
+            return job
+        return r
+
+    def test_limit_task_impact(self, job_host_limit):
+        job = job_host_limit(5, 2)
+        assert job.task_impact == 2 + 1  # forks becomes constraint
+
+    def test_host_task_impact(self, job_host_limit):
+        job = job_host_limit(3, 5)
+        assert job.task_impact == 3 + 1  # hosts becomes constraint
+
+    def test_shard_task_impact(self, slice_job_factory):
+        # factory creates on host per slice
+        workflow_job = slice_job_factory(3, jt_kwargs={'forks': 50}, spawn=True)
+        # arrange the jobs by their number
+        jobs = [None for i in range(3)]
+        for node in workflow_job.workflow_nodes.all():
+            jobs[node.job.job_slice_number - 1] = node.job
+        # Even distribution - all jobs run on 1 host
+        assert [
+            len(jobs[0].inventory.get_script_data(slice_number=i + 1, slice_count=3)['all']['hosts'])
+            for i in range(3)
+        ] == [1, 1, 1]
+        assert [job.task_impact for job in jobs] == [2, 2, 2]  # plus one base task impact
+        # Uneven distribution - first job takes the extra host
+        jobs[0].inventory.hosts.create(name='remainder_foo')
+        assert [
+            len(jobs[0].inventory.get_script_data(slice_number=i + 1, slice_count=3)['all']['hosts'])
+            for i in range(3)
+        ] == [2, 1, 1]
+        assert [job.task_impact for job in jobs] == [3, 2, 2]

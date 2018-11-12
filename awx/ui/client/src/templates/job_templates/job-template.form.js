@@ -245,7 +245,7 @@ function(NotificationsList, i18n) {
                     dataTitle: i18n._('Ansible Environment'),
                     dataContainer: 'body',
                     dataPlacement: 'right',
-                    ngDisabled: '!(job_template_obj.summary_fields.user_capabilities.edit || canAdd)',
+                    ngDisabled: '!(job_template_obj.summary_fields.user_capabilities.edit || canAddJobTemplate)',
                     ngShow: 'custom_virtualenvs_options.length > 1'
                 },
                 instance_groups: {
@@ -256,6 +256,19 @@ function(NotificationsList, i18n) {
                     dataContainer: 'body',
                     dataPlacement: 'right',
                     control: '<instance-groups-multiselect instance-groups="instance_groups" field-is-disabled="!(job_template_obj.summary_fields.user_capabilities.edit || canAddJobTemplate)"></instance-groups-multiselect>',
+                },
+                job_slice_count: {
+                    label: i18n._('Job Slicing'),
+                    type: 'number',
+                    integer: true,
+                    min: 1,
+                    default: 1,
+                    spinner: true,
+                    dataTitle: i18n._('Slice Job Count'),
+                    dataPlacement: 'right',
+                    dataContainer: 'body',
+                    awPopOver: "<p>" + i18n._("Divide the work done by this job template into the specified number of job slices, each running the same tasks against a portion of the inventory.") + "</p>",
+                    ngDisabled: '!(job_template_obj.summary_fields.user_capabilities.edit || canAddJobTemplate)'
                 },
                 diff_mode: {
                     label: i18n._('Show Changes'),
