@@ -250,8 +250,8 @@ TEMPLATES = [
 ]
 
 MIDDLEWARE_CLASSES = (  # NOQA
-    'awx.main.middleware.MigrationRanCheckMiddleware',
     'awx.main.middleware.TimingMiddleware',
+    'awx.main.middleware.MigrationRanCheckMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.locale.LocaleMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -606,6 +606,9 @@ ANSIBLE_PARAMIKO_RECORD_HOST_KEYS = False
 # output
 ANSIBLE_FORCE_COLOR = True
 
+# If tmp generated inventory parsing fails (error state), fail playbook fast
+ANSIBLE_INVENTORY_UNPARSED_FAILED = True
+
 # Additional environment variables to be passed to the ansible subprocesses
 AWX_TASK_ENV = {}
 
@@ -948,7 +951,7 @@ TOWER_ADMIN_ALERTS = True
 # Note: This setting may be overridden by database settings.
 TOWER_URL_BASE = "https://towerhost"
 
-INSIGHTS_URL_BASE = "https://access.redhat.com"
+INSIGHTS_URL_BASE = "https://example.org"
 
 TOWER_SETTINGS_MANIFEST = {}
 

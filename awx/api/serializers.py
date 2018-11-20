@@ -61,7 +61,7 @@ from awx.main.redact import UriCleaner, REPLACE_STR
 
 from awx.main.validators import vars_validate_or_raise
 
-from awx.conf.license import feature_enabled
+from awx.conf.license import feature_enabled, LicenseForbids
 from awx.api.versioning import reverse, get_request_version
 from awx.api.fields import (BooleanNullField, CharNullField, ChoiceNullField,
                             VerbatimField, DeprecatedCredentialField)
@@ -1499,6 +1499,12 @@ class InventorySerializer(BaseSerializerWithVariables):
         'admin', 'adhoc',
         {'copy': 'organization.inventory_admin'}
     ]
+    groups_with_active_failures = serializers.IntegerField(
+        read_only=True,
+        min_value=0,
+        help_text=_('This field has been deprecated and will be removed in a future release')
+    )
+
 
     class Meta:
         model = Inventory
@@ -1720,6 +1726,11 @@ class AnsibleFactsSerializer(BaseSerializer):
 
 class GroupSerializer(BaseSerializerWithVariables):
     capabilities_prefetch = ['inventory.admin', 'inventory.adhoc']
+    groups_with_active_failures = serializers.IntegerField(
+        read_only=True,
+        min_value=0,
+        help_text=_('This field has been deprecated and will be removed in a future release')
+    )
 
     class Meta:
         model = Group
@@ -3046,7 +3057,7 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
 
         prompting_error_message = _("Must either set a default value or ask to prompt on launch.")
         if project is None:
-            raise serializers.ValidationError({'project': _("Job types 'run' and 'check' must have assigned a project.")})
+            raise serializers.ValidationError({'project': _("Job Templates must have a project assigned.")})
         elif inventory is None and not get_field_from_model_or_attrs('ask_inventory_on_launch'):
             raise serializers.ValidationError({'inventory': prompting_error_message})
 
@@ -3054,6 +3065,13 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
 
     def validate_extra_vars(self, value):
         return vars_validate_or_raise(value)
+
+    def validate_job_slice_count(self, value):
+        if value > 1 and not feature_enabled('workflows'):
+            raise LicenseForbids({'job_slice_count': [_(
+                "Job slicing is a workflows-based feature and your license does not allow use of workflows."
+            )]})
+        return value
 
     def get_summary_fields(self, obj):
         summary_fields = super(JobTemplateSerializer, self).get_summary_fields(obj)
@@ -3098,6 +3116,15 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
             summary_fields['credentials'] = all_creds
         return summary_fields
 
+
+class JobTemplateWithSpecSerializer(JobTemplateSerializer):
+    '''
+    Used for activity stream entries.
+    '''
+
+    class Meta:
+        model = JobTemplate
+        fields = ('*', 'survey_spec')
 
 
 class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
@@ -3572,7 +3599,7 @@ class WorkflowJobTemplateSerializer(JobTemplateMixin, LabelsListMixin, UnifiedJo
     class Meta:
         model = WorkflowJobTemplate
         fields = ('*', 'extra_vars', 'organization', 'survey_enabled', 'allow_simultaneous',
-                  'ask_variables_on_launch',)
+                  'ask_variables_on_launch', 'inventory', 'ask_inventory_on_launch',)
 
     def get_related(self, obj):
         res = super(WorkflowJobTemplateSerializer, self).get_related(obj)
@@ -3600,13 +3627,24 @@ class WorkflowJobTemplateSerializer(JobTemplateMixin, LabelsListMixin, UnifiedJo
         return vars_validate_or_raise(value)
 
 
+class WorkflowJobTemplateWithSpecSerializer(WorkflowJobTemplateSerializer):
+    '''
+    Used for activity stream entries.
+    '''
+
+    class Meta:
+        model = WorkflowJobTemplate
+        fields = ('*', 'survey_spec')
+
+
 class WorkflowJobSerializer(LabelsListMixin, UnifiedJobSerializer):
 
     class Meta:
         model = WorkflowJob
         fields = ('*', 'workflow_job_template', 'extra_vars', 'allow_simultaneous',
                   'job_template', 'is_sliced_job',
-                  '-execution_node', '-event_processing_finished', '-controller_node',)
+                  '-execution_node', '-event_processing_finished', '-controller_node',
+                  'inventory',)
 
     def get_related(self, obj):
         res = super(WorkflowJobSerializer, self).get_related(obj)
@@ -3689,7 +3727,7 @@ class LaunchConfigurationBaseSerializer(BaseSerializer):
         if obj is None:
             return ret
         if 'extra_data' in ret and obj.survey_passwords:
-            ret['extra_data'] = obj.display_extra_data()
+            ret['extra_data'] = obj.display_extra_vars()
         return ret
 
     def get_summary_fields(self, obj):
@@ -4380,37 +4418,63 @@ class JobLaunchSerializer(BaseSerializer):
 class WorkflowJobLaunchSerializer(BaseSerializer):
 
     can_start_without_user_input = serializers.BooleanField(read_only=True)
+    defaults = serializers.SerializerMethodField()
     variables_needed_to_start = serializers.ReadOnlyField()
     survey_enabled = serializers.SerializerMethodField()
     extra_vars = VerbatimField(required=False, write_only=True)
+    inventory = serializers.PrimaryKeyRelatedField(
+        queryset=Inventory.objects.all(),
+        required=False, write_only=True
+    )
     workflow_job_template_data = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkflowJobTemplate
-        fields = ('can_start_without_user_input', 'extra_vars',
-                  'survey_enabled', 'variables_needed_to_start',
+        fields = ('ask_inventory_on_launch', 'can_start_without_user_input', 'defaults', 'extra_vars',
+                  'inventory', 'survey_enabled', 'variables_needed_to_start',
                   'node_templates_missing', 'node_prompts_rejected',
-                  'workflow_job_template_data')
+                  'workflow_job_template_data', 'survey_enabled')
+        read_only_fields = ('ask_inventory_on_launch',)
 
     def get_survey_enabled(self, obj):
         if obj:
             return obj.survey_enabled and 'spec' in obj.survey_spec
         return False
 
+    def get_defaults(self, obj):
+        defaults_dict = {}
+        for field_name in WorkflowJobTemplate.get_ask_mapping().keys():
+            if field_name == 'inventory':
+                defaults_dict[field_name] = dict(
+                    name=getattrd(obj, '%s.name' % field_name, None),
+                    id=getattrd(obj, '%s.pk' % field_name, None))
+            else:
+                defaults_dict[field_name] = getattr(obj, field_name)
+        return defaults_dict
+
     def get_workflow_job_template_data(self, obj):
         return dict(name=obj.name, id=obj.id, description=obj.description)
 
     def validate(self, attrs):
-        obj = self.instance
+        template = self.instance
 
-        accepted, rejected, errors = obj._accept_or_ignore_job_kwargs(
-            _exclude_errors=['required'],
-            **attrs)
+        accepted, rejected, errors = template._accept_or_ignore_job_kwargs(**attrs)
+        self._ignored_fields = rejected
 
-        WFJT_extra_vars = obj.extra_vars
-        attrs = super(WorkflowJobLaunchSerializer, self).validate(attrs)
-        obj.extra_vars = WFJT_extra_vars
-        return attrs
+        if template.inventory and template.inventory.pending_deletion is True:
+            errors['inventory'] = _("The inventory associated with this Workflow is being deleted.")
+        elif 'inventory' in accepted and accepted['inventory'].pending_deletion:
+            errors['inventory'] = _("The provided inventory is being deleted.")
+
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        WFJT_extra_vars = template.extra_vars
+        WFJT_inventory = template.inventory
+        super(WorkflowJobLaunchSerializer, self).validate(attrs)
+        template.extra_vars = WFJT_extra_vars
+        template.inventory = WFJT_inventory
+        return accepted
 
 
 class NotificationTemplateSerializer(BaseSerializer):

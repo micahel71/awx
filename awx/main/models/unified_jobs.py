@@ -30,15 +30,21 @@ from rest_framework.exceptions import ParseError
 from polymorphic.models import PolymorphicModel
 
 # AWX
-from awx.main.models.base import * # noqa
+from awx.main.models.base import (
+    CommonModelNameNotUnique,
+    PasswordFieldsModel,
+    NotificationFieldsModel,
+    prevent_search
+)
 from awx.main.dispatch.control import Control as ControlDispatcher
+from awx.main.registrar import activity_stream_registrar
 from awx.main.models.mixins import ResourceMixin, TaskManagerUnifiedJobMixin
 from awx.main.utils import (
     encrypt_dict, decrypt_field, _inventory_updates,
     copy_model_by_class, copy_m2m_relationships,
     get_type_for_model, parse_yaml_or_json, getattr_dne
 )
-from awx.main.utils import polymorphic
+from awx.main.utils import polymorphic, schedule_task_manager
 from awx.main.constants import ACTIVE_STATES, CAN_CANCEL
 from awx.main.redact import UriCleaner, REPLACE_STR
 from awx.main.consumers import emit_channel_notification
@@ -315,6 +321,7 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
         Return notification_templates relevant to this Unified Job Template
         '''
         # NOTE: Derived classes should implement
+        from awx.main.models.notifications import NotificationTemplate
         return NotificationTemplate.objects.none()
 
     def create_unified_job(self, **kwargs):
@@ -368,7 +375,12 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
             unified_job.survey_passwords = new_job_passwords
             kwargs['survey_passwords'] = new_job_passwords  # saved in config object for relaunch
 
-        unified_job.save()
+        from awx.main.signals import disable_activity_stream, activity_stream_create
+        with disable_activity_stream():
+            # Don't emit the activity stream record here for creation,
+            # because we haven't attached important M2M relations yet, like
+            # credentials and labels
+            unified_job.save()
 
         # Labels and credentials copied here
         if validated_kwargs.get('credentials'):
@@ -380,7 +392,6 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
             validated_kwargs['credentials'] = [cred for cred in cred_dict.values()]
             kwargs['credentials'] = validated_kwargs['credentials']
 
-        from awx.main.signals import disable_activity_stream
         with disable_activity_stream():
             copy_m2m_relationships(self, unified_job, fields, kwargs=validated_kwargs)
 
@@ -390,6 +401,11 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
         if not getattr(self, '_deprecated_credential_launch', False):
             # Create record of provided prompts for relaunch and rescheduling
             unified_job.create_config_from_prompts(kwargs, parent=self)
+
+        # manually issue the create activity stream entry _after_ M2M relations
+        # have been associated to the UJ
+        if unified_job.__class__ in activity_stream_registrar.models:
+            activity_stream_create(None, unified_job, True)
 
         return unified_job
 
@@ -1245,8 +1261,7 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         self.update_fields(start_args=json.dumps(kwargs), status='pending')
         self.websocket_emit_status("pending")
 
-        from awx.main.scheduler.tasks import run_job_launch
-        connection.on_commit(lambda: run_job_launch.delay(self.id))
+        schedule_task_manager()
 
         # Each type of unified job has a different Task class; get the
         # appropirate one.

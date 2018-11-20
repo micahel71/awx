@@ -56,7 +56,7 @@ from awx.main.dispatch import get_local_queuename, reaper
 from awx.main.utils import (get_ansible_version, get_ssh_version, decrypt_field, update_scm_url,
                             check_proot_installed, build_proot_temp_dir, get_licenser,
                             wrap_args_with_proot, OutputEventFilter, OutputVerboseFilter, ignore_inventory_computed_fields,
-                            ignore_inventory_group_removal, extract_ansible_vars)
+                            ignore_inventory_group_removal, extract_ansible_vars, schedule_task_manager)
 from awx.main.utils.safe_yaml import safe_dump, sanitize_jinja
 from awx.main.utils.reload import stop_local_services
 from awx.main.utils.pglock import advisory_lock
@@ -493,8 +493,7 @@ def handle_work_success(task_actual):
     if not instance:
         return
 
-    from awx.main.scheduler.tasks import run_job_complete
-    run_job_complete.delay(instance.id)
+    schedule_task_manager()
 
 
 @task()
@@ -533,8 +532,7 @@ def handle_work_error(task_id, *args, **kwargs):
     # what the job complete message handler does then we may want to send a
     # completion event for each job here.
     if first_instance:
-        from awx.main.scheduler.tasks import run_job_complete
-        run_job_complete.delay(first_instance.id)
+        schedule_task_manager()
         pass
 
 
@@ -1210,8 +1208,6 @@ class RunJob(BaseTask):
         if job.project:
             env['PROJECT_REVISION'] = job.project.scm_revision
         env['ANSIBLE_RETRY_FILES_ENABLED'] = "False"
-        env['ANSIBLE_INVENTORY_ENABLED'] = 'script'
-        env['ANSIBLE_INVENTORY_UNPARSED_FAILED'] = 'True'
         env['MAX_EVENT_RES'] = str(settings.MAX_EVENT_RES_DATA)
         if not kwargs.get('isolated'):
             env['ANSIBLE_CALLBACK_PLUGINS'] = plugin_path
@@ -1225,9 +1221,6 @@ class RunJob(BaseTask):
         if not os.path.exists(cp_dir):
             os.mkdir(cp_dir, 0o700)
         env['ANSIBLE_SSH_CONTROL_PATH_DIR'] = cp_dir
-
-        # Allow the inventory script to include host variables inline via ['_meta']['hostvars'].
-        env['INVENTORY_HOSTVARS'] = str(True)
 
         # Set environment variables for cloud credentials.
         cred_files = kwargs.get('private_data_files', {}).get('credentials', {})
@@ -1388,6 +1381,12 @@ class RunJob(BaseTask):
             if job.is_isolated() is True:
                 pu_ig = pu_ig.controller
                 pu_en = settings.CLUSTER_HOST_ID
+            if job.project.status in ('error', 'failed'):
+                msg = _(
+                    'The project revision for this job template is unknown due to a failed update.'
+                )
+                job = self.update_model(job.pk, status='failed', job_explanation=msg)
+                raise RuntimeError(msg)
             local_project_sync = job.project.create_project_update(
                 _eager_fields=dict(
                     launch_type="sync",
