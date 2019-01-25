@@ -1,8 +1,6 @@
 # Python
 import pytest
-import mock
-
-from six.moves import xrange
+from unittest import mock
 
 # AWX
 from awx.api.serializers import (
@@ -41,7 +39,7 @@ def job(mocker, job_template):
 
 @pytest.fixture
 def jobs(mocker):
-    return [Job(id=x, name='job-%d' % x) for x in xrange(0, 25)]
+    return [Job(id=x, name='job-%d' % x) for x in range(0, 25)]
 
 
 @mock.patch('awx.api.serializers.UnifiedJobTemplateSerializer.get_related', lambda x,y: {})
@@ -69,27 +67,17 @@ class TestJobTemplateSerializerGetRelated():
 
 
 class TestJobTemplateSerializerGetSummaryFields():
-    def test__recent_jobs(self, mocker, job_template, jobs):
-
-        job_template.jobs.all = mocker.MagicMock(**{'order_by.return_value': jobs})
-        job_template.jobs.all.return_value = job_template.jobs.all
-
-        serializer = JobTemplateSerializer()
-        recent_jobs = serializer._recent_jobs(job_template)
-
-        job_template.jobs.all.assert_called_once_with()
-        job_template.jobs.all.order_by.assert_called_once_with('-created')
-        assert len(recent_jobs) == 10
-        for x in jobs[:10]:
-            assert recent_jobs == [{'id': x.id, 'status': x.status, 'finished': x.finished} for x in jobs[:10]]
-
     def test_survey_spec_exists(self, test_get_summary_fields, mocker, job_template):
         job_template.survey_spec = {'name': 'blah', 'description': 'blah blah'}
-        test_get_summary_fields(JobTemplateSerializer, job_template, 'survey')
+        with mocker.patch.object(JobTemplateSerializer, '_recent_jobs') as mock_rj:
+            mock_rj.return_value = []
+            test_get_summary_fields(JobTemplateSerializer, job_template, 'survey')
 
-    def test_survey_spec_absent(self, get_summary_fields_mock_and_run, job_template):
+    def test_survey_spec_absent(self, get_summary_fields_mock_and_run, mocker, job_template):
         job_template.survey_spec = None
-        summary = get_summary_fields_mock_and_run(JobTemplateSerializer, job_template)
+        with mocker.patch.object(JobTemplateSerializer, '_recent_jobs') as mock_rj:
+            mock_rj.return_value = []
+            summary = get_summary_fields_mock_and_run(JobTemplateSerializer, job_template)
         assert 'survey' not in summary
 
     def test_copy_edit_standard(self, mocker, job_template_factory):

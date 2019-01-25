@@ -40,7 +40,7 @@ def IS_TESTING(argv=None):
 
 
 if "pytest" in sys.modules:
-    import mock
+    from unittest import mock
     with mock.patch('__main__.__builtins__.dir', return_value=[]):
         import ldap
 else:
@@ -429,6 +429,9 @@ AWX_ISOLATED_CONNECTION_TIMEOUT = 10
 
 # The time (in seconds) between the periodic isolated heartbeat status check
 AWX_ISOLATED_PERIODIC_CHECK = 600
+
+# Verbosity level for isolated node management tasks
+AWX_ISOLATED_VERBOSITY = 0
 
 # Memcached django cache configuration
 # CACHES = {
@@ -1116,11 +1119,11 @@ LOGGING = {
             'handlers': ['console'],
         },
         'django.request': {
-            'handlers': ['mail_admins', 'console', 'file', 'tower_warnings'],
+            'handlers': ['console', 'file', 'tower_warnings'],
             'level': 'WARNING',
         },
         'rest_framework.request': {
-            'handlers': ['mail_admins', 'console', 'file', 'tower_warnings'],
+            'handlers': ['console', 'file', 'tower_warnings'],
             'level': 'WARNING',
             'propagate': False,
         },

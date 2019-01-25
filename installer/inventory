@@ -65,6 +65,8 @@ host_port=8081
 # a new postgres service will be created
 # pg_hostname=postgresql
 pg_username=awx
+# pg_password should be random 10 character alphanumeric string, when postgresql is running on kubernetes
+# NB: it's a limitation of the "official" postgres helm chart
 pg_password=awxpass
 pg_database=awx
 pg_port=5432
@@ -121,7 +123,7 @@ project_data_dir=/var/lib/awx/projects
 # this variable causes this directory on the host to be bind mounted over
 # /etc/pki/ca-trust in the awx_task and awx_web containers.
 # NOTE: only obeyed in local_docker install
-ca_trust_dir=/etc/pki/ca-trust
+ca_trust_dir=/etc/pki/ca-trust/source/anchors
 
 # Include /etc/nginx/awx_extra.conf
 # Note the use of glob pattern for nginx

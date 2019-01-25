@@ -383,6 +383,8 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
         super(Credential, self).save(*args, **kwargs)
 
     def encrypt_field(self, field, ask):
+        if not hasattr(self, field):
+            return None
         encrypted = encrypt_field(self, field, ask=ask)
         if encrypted:
             self.inputs[field] = encrypted
@@ -477,6 +479,9 @@ class CredentialType(CommonModelNameNotUnique):
     )
 
     def get_absolute_url(self, request=None):
+        # Page does not exist in API v1
+        if request.version == 'v1':
+            return reverse('api:credential_type_detail', kwargs={'pk': self.pk})
         return reverse('api:credential_type_detail', kwargs={'pk': self.pk}, request=request)
 
     @property
@@ -627,7 +632,7 @@ class CredentialType(CommonModelNameNotUnique):
             data = Template(file_tmpl).render(**namespace)
             _, path = tempfile.mkstemp(dir=private_data_dir)
             with open(path, 'w') as f:
-                f.write(data.encode('utf-8'))
+                f.write(data)
             os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
             # determine if filename indicates single file or many
@@ -977,7 +982,7 @@ def cloudforms(cls):
                 'label': ugettext_noop('CloudForms URL'),
                 'type': 'string',
                 'help_text': ugettext_noop('Enter the URL for the virtual machine that '
-                                           'corresponds to your CloudForm instance. '
+                                           'corresponds to your CloudForms instance. '
                                            'For example, https://cloudforms.example.org')
             }, {
                 'id': 'username',

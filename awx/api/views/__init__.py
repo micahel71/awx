@@ -9,6 +9,7 @@ import time
 import socket
 import sys
 import requests
+import functools
 from base64 import b64encode
 from collections import OrderedDict, Iterable
 import six
@@ -17,7 +18,7 @@ import six
 # Django
 from django.conf import settings
 from django.core.exceptions import FieldError, ObjectDoesNotExist
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.db import IntegrityError, transaction, connection
 from django.shortcuts import get_object_or_404
 from django.utils.safestring import mark_safe
@@ -172,7 +173,7 @@ class DashboardView(APIView):
         user_inventory = get_user_queryset(request.user, Inventory)
         inventory_with_failed_hosts = user_inventory.filter(hosts_with_active_failures__gt=0)
         user_inventory_external = user_inventory.filter(has_inventory_sources=True)
-        failed_inventory = sum(i.inventory_sources_with_failures for i in user_inventory)
+        failed_inventory = user_inventory.aggregate(Sum('inventory_sources_with_failures'))['inventory_sources_with_failures__sum']
         data['inventories'] = {'url': reverse('api:inventory_list', request=request),
                                'total': user_inventory.count(),
                                'total_with_inventory_source': user_inventory_external.count(),
@@ -516,7 +517,7 @@ class AuthView(APIView):
         from rest_framework.reverse import reverse
         data = OrderedDict()
         err_backend, err_message = request.session.get('social_auth_error', (None, None))
-        auth_backends = load_backends(settings.AUTHENTICATION_BACKENDS, force_load=True).items()
+        auth_backends = list(load_backends(settings.AUTHENTICATION_BACKENDS, force_load=True).items())
         # Return auth backends in consistent order: Google, GitHub, SAML.
         auth_backends.sort(key=lambda x: 'g' if x[0] == 'google-oauth2' else x[0])
         for name, backend in auth_backends:
@@ -2307,7 +2308,7 @@ class JobTemplateLaunch(RetrieveAPIView):
                         raise ParseError({key: [msg], 'credentials': [msg]})
 
                     # add the deprecated credential specified in the request
-                    if not isinstance(prompted_value, Iterable) or isinstance(prompted_value, basestring):
+                    if not isinstance(prompted_value, Iterable) or isinstance(prompted_value, str):
                         prompted_value = [prompted_value]
 
                     # If user gave extra_credentials, special case to use exactly
@@ -2957,6 +2958,18 @@ class WorkflowJobTemplateNodeChildrenBaseList(WorkflowsEnforcementMixin, Enforce
         if parent.id == sub.id:
             return {"Error": _("Cycle detected.")}
 
+        '''
+        Look for parent->child connection in all relationships except the relationship that is
+        attempting to be added; because it's ok to re-add the relationship
+        '''
+        relationships = ['success_nodes', 'failure_nodes', 'always_nodes']
+        relationships.remove(self.relationship)
+        qs = functools.reduce(lambda x, y: (x | y),
+                              (Q(**{'{}__in'.format(rel): [sub.id]}) for rel in relationships))
+
+        if WorkflowJobTemplateNode.objects.filter(Q(pk=parent.id) & qs).exists():
+            return {"Error": _("Relationship not allowed.")}
+
         parent_node_type_relationship = getattr(parent, self.relationship)
         parent_node_type_relationship.add(sub)
 
@@ -3140,8 +3153,12 @@ class WorkflowJobRelaunch(WorkflowsEnforcementMixin, GenericAPIView):
 
     def post(self, request, *args, **kwargs):
         obj = self.get_object()
-        if obj.is_sliced_job and not obj.job_template_id:
-            raise ParseError(_('Cannot relaunch slice workflow job orphaned from job template.'))
+        if obj.is_sliced_job:
+            jt = obj.job_template
+            if not jt:
+                raise ParseError(_('Cannot relaunch slice workflow job orphaned from job template.'))
+            elif not jt.inventory or min(jt.inventory.hosts.count(), jt.job_slice_count) != obj.workflow_nodes.count():
+                raise ParseError(_('Cannot relaunch sliced workflow job after slice count has changed.'))
         new_workflow_job = obj.create_relaunch_workflow_job()
         new_workflow_job.signal_start()
 
@@ -4442,7 +4459,7 @@ class RoleChildrenList(SubListAPIView):
 # in URL patterns and reverse URL lookups, converting CamelCase names to
 # lowercase_with_underscore (e.g. MyView.as_view() becomes my_view).
 this_module = sys.modules[__name__]
-for attr, value in locals().items():
+for attr, value in list(locals().items()):
     if isinstance(value, type) and issubclass(value, APIView):
         name = camelcase_to_underscore(attr)
         view = value.as_view()

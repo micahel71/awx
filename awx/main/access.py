@@ -1276,6 +1276,7 @@ class JobTemplateAccess(BaseAccess):
         'instance_groups',
         'credentials__credential_type',
         Prefetch('labels', queryset=Label.objects.all().order_by('name')),
+        Prefetch('last_job', queryset=UnifiedJob.objects.non_polymorphic()),
     )
 
     def filtered_queryset(self):
@@ -1389,13 +1390,15 @@ class JobTemplateAccess(BaseAccess):
             'job_tags', 'force_handlers', 'skip_tags', 'ask_variables_on_launch',
             'ask_tags_on_launch', 'ask_job_type_on_launch', 'ask_skip_tags_on_launch',
             'ask_inventory_on_launch', 'ask_credential_on_launch', 'survey_enabled',
-            'custom_virtualenv', 'diff_mode',
+            'custom_virtualenv', 'diff_mode', 'timeout', 'job_slice_count',
 
             # These fields are ignored, but it is convenient for QA to allow clients to post them
             'last_job_run', 'created', 'modified',
         ]
 
         for k, v in data.items():
+            if k not in [x.name for x in obj._meta.concrete_fields]:
+                continue
             if hasattr(obj, k) and getattr(obj, k) != v:
                 if k not in field_whitelist and v != getattr(obj, '%s_id' % k, None) \
                         and not (hasattr(obj, '%s_id' % k) and getattr(obj, '%s_id' % k) is None and v == ''): # Equate '' to None in the case of foreign keys

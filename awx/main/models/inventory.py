@@ -3,12 +3,14 @@
 
 # Python
 import datetime
+import time
+import itertools
 import logging
 import re
 import copy
-from urlparse import urljoin
 import os.path
 import six
+from urllib.parse import urljoin
 
 # Django
 from django.conf import settings
@@ -342,9 +344,13 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
             host_updates = hosts_to_update.setdefault(host_pk, {})
             host_updates['has_inventory_sources'] = False
         # Now apply updates to hosts where needed (in batches).
-        all_update_pks = hosts_to_update.keys()
-        for offset in xrange(0, len(all_update_pks), 500):
-            update_pks = all_update_pks[offset:(offset + 500)]
+        all_update_pks = list(hosts_to_update.keys())
+
+        def _chunk(items, chunk_size):
+            for i, group in itertools.groupby(enumerate(items), lambda x: x[0] // chunk_size):
+                yield (g[1] for g in group)
+
+        for update_pks in _chunk(all_update_pks, 500):
             for host in hosts_qs.filter(pk__in=update_pks):
                 host_updates = hosts_to_update[host.pk]
                 for field, value in host_updates.items():
@@ -411,12 +417,12 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
                 failed_group_pks.add(group_pk)
 
         # Now apply updates to each group as needed (in batches).
-        all_update_pks = groups_to_update.keys()
-        for offset in xrange(0, len(all_update_pks), 500):
+        all_update_pks = list(groups_to_update.keys())
+        for offset in range(0, len(all_update_pks), 500):
             update_pks = all_update_pks[offset:(offset + 500)]
             for group in self.groups.filter(pk__in=update_pks):
                 group_updates = groups_to_update[group.pk]
-                for field, value in group_updates.items():
+                for field, value in list(group_updates.items()):
                     if getattr(group, field) != value:
                         setattr(group, field, value)
                     else:
@@ -428,7 +434,8 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
         '''
         Update model fields that are computed from database relationships.
         '''
-        logger.debug("Going to update inventory computed fields")
+        logger.debug("Going to update inventory computed fields, pk={0}".format(self.pk))
+        start_time = time.time()
         if update_hosts:
             self.update_host_computed_fields()
         if update_groups:
@@ -456,7 +463,7 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
         }
         # CentOS python seems to have issues clobbering the inventory on poor timing during certain operations
         iobj = Inventory.objects.get(id=self.id)
-        for field, value in computed_fields.items():
+        for field, value in list(computed_fields.items()):
             if getattr(iobj, field) != value:
                 setattr(iobj, field, value)
                 # update in-memory object
@@ -465,7 +472,8 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
                 computed_fields.pop(field)
         if computed_fields:
             iobj.save(update_fields=computed_fields.keys())
-        logger.debug("Finished updating inventory computed fields")
+        logger.debug("Finished updating inventory computed fields, pk={0}, in "
+                     "{1:.3f} seconds".format(self.pk, time.time() - start_time))
 
     def websocket_emit_status(self, status):
         connection.on_commit(lambda: emit_channel_notification(

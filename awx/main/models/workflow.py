@@ -2,7 +2,6 @@
 # All Rights Reserved.
 
 # Python
-#import urlparse
 import logging
 
 # Django
@@ -37,7 +36,7 @@ from awx.main.redact import REPLACE_STR
 from awx.main.fields import JSONField
 
 from copy import copy
-from urlparse import urljoin
+from urllib.parse import urljoin
 
 __all__ = ['WorkflowJobTemplate', 'WorkflowJob', 'WorkflowJobOptions', 'WorkflowJobNode', 'WorkflowJobTemplateNode',]
 
@@ -264,12 +263,13 @@ class WorkflowJobNode(WorkflowNodeBase):
             data['survey_passwords'] = password_dict
         # process extra_vars
         extra_vars = data.get('extra_vars', {})
-        if aa_dict:
-            functional_aa_dict = copy(aa_dict)
-            functional_aa_dict.pop('_ansible_no_log', None)
-            extra_vars.update(functional_aa_dict)
-        # Workflow Job extra_vars higher precedence than ancestor artifacts
+        if ujt_obj and isinstance(ujt_obj, (JobTemplate, WorkflowJobTemplate)):
+            if aa_dict:
+                functional_aa_dict = copy(aa_dict)
+                functional_aa_dict.pop('_ansible_no_log', None)
+                extra_vars.update(functional_aa_dict)
         if ujt_obj and isinstance(ujt_obj, JobTemplate):
+            # Workflow Job extra_vars higher precedence than ancestor artifacts
             if self.workflow_job and self.workflow_job.extra_vars:
                 extra_vars.update(self.workflow_job.extra_vars_dict)
         if extra_vars:
