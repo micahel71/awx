@@ -9,7 +9,6 @@ import logging
 import re
 import copy
 import os.path
-import six
 from urllib.parse import urljoin
 
 # Django
@@ -41,6 +40,7 @@ from awx.main.models.mixins import (
     ResourceMixin,
     TaskManagerInventoryUpdateMixin,
     RelatedJobsMixin,
+    CustomVirtualEnvMixin,
 )
 from awx.main.models.notifications import (
     NotificationTemplate,
@@ -1355,7 +1355,7 @@ class InventorySourceOptions(BaseModel):
     source_vars_dict = VarsDictProperty('source_vars')
 
     def clean_instance_filters(self):
-        instance_filters = six.text_type(self.instance_filters or '')
+        instance_filters = str(self.instance_filters or '')
         if self.source == 'ec2':
             invalid_filters = []
             instance_filter_re = re.compile(r'^((tag:.+)|([a-z][a-z\.-]*[a-z]))=.*$')
@@ -1381,7 +1381,7 @@ class InventorySourceOptions(BaseModel):
             return ''
 
     def clean_group_by(self):
-        group_by = six.text_type(self.group_by or '')
+        group_by = str(self.group_by or '')
         if self.source == 'ec2':
             get_choices = getattr(self, 'get_%s_group_by_choices' % self.source)
             valid_choices = [x[0] for x in get_choices()]
@@ -1538,7 +1538,7 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, RelatedJobsMix
             if '_eager_fields' not in kwargs:
                 kwargs['_eager_fields'] = {}
             if 'name' not in kwargs['_eager_fields']:
-                name = six.text_type('{} - {}').format(self.inventory.name, self.name)
+                name = '{} - {}'.format(self.inventory.name, self.name)
                 name_field = self._meta.get_field('name')
                 if len(name) > name_field.max_length:
                     name = name[:name_field.max_length]
@@ -1622,7 +1622,7 @@ class InventorySource(UnifiedJobTemplate, InventorySourceOptions, RelatedJobsMix
         return InventoryUpdate.objects.filter(inventory_source=self)
 
 
-class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, TaskManagerInventoryUpdateMixin):
+class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, TaskManagerInventoryUpdateMixin, CustomVirtualEnvMixin):
     '''
     Internal job for tracking inventory updates from external sources.
     '''
@@ -1740,6 +1740,14 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
         if not selected_groups:
             return self.global_instance_groups
         return selected_groups
+
+    @property
+    def ansible_virtualenv_path(self):
+        if self.inventory_source and self.inventory_source.inventory:
+            organization = self.inventory_source.inventory.organization
+            if organization and organization.custom_virtualenv:
+                return organization.custom_virtualenv
+        return settings.ANSIBLE_VENV_PATH
 
     def cancel(self, job_explanation=None, is_chain=False):
         res = super(InventoryUpdate, self).cancel(job_explanation=job_explanation, is_chain=is_chain)

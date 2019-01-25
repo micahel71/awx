@@ -12,7 +12,6 @@ import requests
 import functools
 from base64 import b64encode
 from collections import OrderedDict, Iterable
-import six
 
 
 # Django
@@ -70,7 +69,6 @@ from awx.main.models import * # noqa
 from awx.main.utils import * # noqa
 from awx.main.utils import (
     extract_ansible_vars,
-    decrypt_field,
 )
 from awx.main.utils.encryption import encrypt_value
 from awx.main.utils.filters import SmartFilter
@@ -1436,7 +1434,7 @@ class HostList(HostRelatedSearchMixin, ListCreateAPIView):
         try:
             return super(HostList, self).list(*args, **kwargs)
         except Exception as e:
-            return Response(dict(error=_(six.text_type(e))), status=status.HTTP_400_BAD_REQUEST)
+            return Response(dict(error=_(str(e))), status=status.HTTP_400_BAD_REQUEST)
 
 
 class HostDetail(RelatedJobsPreventDeleteMixin, ControlledByScmMixin, RetrieveUpdateDestroyAPIView):
@@ -1592,7 +1590,7 @@ class HostInsights(GenericAPIView):
     serializer_class = EmptySerializer
 
     def _extract_insights_creds(self, credential):
-        return (credential.inputs['username'], decrypt_field(credential, 'password'))
+        return (credential.get_input('username', default=''), credential.get_input('password', default=''))
 
     def _get_insights(self, url, username, password):
         session = requests.Session()
@@ -1879,7 +1877,7 @@ class InventoryScriptView(RetrieveAPIView):
         show_all = bool(request.query_params.get('all', ''))
         subset = request.query_params.get('subset', '')
         if subset:
-            if not isinstance(subset, six.string_types):
+            if not isinstance(subset, str):
                 raise ParseError(_('Inventory subset argument must be a string.'))
             if subset.startswith('slice'):
                 slice_number, slice_count = Inventory.parse_slice_params(subset)
@@ -1973,7 +1971,7 @@ class InventoryInventorySourcesUpdate(RetrieveAPIView):
             details['status'] = None
             if inventory_source.can_update:
                 update = inventory_source.update()
-                details.update(InventoryUpdateSerializer(update, context=self.get_serializer_context()).to_representation(update))
+                details.update(InventoryUpdateDetailSerializer(update, context=self.get_serializer_context()).to_representation(update))
                 details['status'] = 'started'
                 details['inventory_update'] = update.id
                 successes += 1
@@ -2136,7 +2134,7 @@ class InventorySourceUpdateView(RetrieveAPIView):
                 headers = {'Location': update.get_absolute_url(request=request)}
                 data = OrderedDict()
                 data['inventory_update'] = update.id
-                data.update(InventoryUpdateSerializer(update, context=self.get_serializer_context()).to_representation(update))
+                data.update(InventoryUpdateDetailSerializer(update, context=self.get_serializer_context()).to_representation(update))
                 return Response(data, status=status.HTTP_202_ACCEPTED, headers=headers)
         else:
             return self.http_method_not_allowed(request, *args, **kwargs)
@@ -2151,7 +2149,7 @@ class InventoryUpdateList(ListAPIView):
 class InventoryUpdateDetail(UnifiedJobDeletionMixin, RetrieveDestroyAPIView):
 
     model = InventoryUpdate
-    serializer_class = InventoryUpdateSerializer
+    serializer_class = InventoryUpdateDetailSerializer
 
 
 class InventoryUpdateCredentialsList(SubListAPIView):
@@ -2417,11 +2415,11 @@ class JobTemplateSurveySpec(GenericAPIView):
     serializer_class = EmptySerializer
 
     ALLOWED_TYPES = {
-        'text': six.string_types,
-        'textarea': six.string_types,
-        'password': six.string_types,
-        'multiplechoice': six.string_types,
-        'multiselect': six.string_types,
+        'text': str,
+        'textarea': str,
+        'password': str,
+        'multiplechoice': str,
+        'multiselect': str,
         'integer': int,
         'float': float
     }
@@ -2456,8 +2454,8 @@ class JobTemplateSurveySpec(GenericAPIView):
     def _validate_spec_data(new_spec, old_spec):
         schema_errors = {}
         for field, expect_type, type_label in [
-                ('name', six.string_types, 'string'),
-                ('description', six.string_types, 'string'),
+                ('name', str, 'string'),
+                ('description', str, 'string'),
                 ('spec', list, 'list of items')]:
             if field not in new_spec:
                 schema_errors['error'] = _("Field '{}' is missing from survey spec.").format(field)
@@ -2475,7 +2473,7 @@ class JobTemplateSurveySpec(GenericAPIView):
         old_spec_dict = JobTemplate.pivot_spec(old_spec)
         for idx, survey_item in enumerate(new_spec["spec"]):
             context = dict(
-                idx=six.text_type(idx),
+                idx=str(idx),
                 survey_item=survey_item
             )
             # General element validation
@@ -2487,7 +2485,7 @@ class JobTemplateSurveySpec(GenericAPIView):
                         field_name=field_name, **context
                     )), status=status.HTTP_400_BAD_REQUEST)
                 val = survey_item[field_name]
-                allow_types = six.string_types
+                allow_types = str
                 type_label = 'string'
                 if field_name == 'required':
                     allow_types = bool
@@ -2535,7 +2533,7 @@ class JobTemplateSurveySpec(GenericAPIView):
                 )))
 
             # Process encryption substitution
-            if ("default" in survey_item and isinstance(survey_item['default'], six.string_types) and
+            if ("default" in survey_item and isinstance(survey_item['default'], str) and
                     survey_item['default'].startswith('$encrypted$')):
                 # Submission expects the existence of encrypted DB value to replace given default
                 if qtype != "password":
@@ -2547,7 +2545,7 @@ class JobTemplateSurveySpec(GenericAPIView):
                 encryptedish_default_exists = False
                 if 'default' in old_element:
                     old_default = old_element['default']
-                    if isinstance(old_default, six.string_types):
+                    if isinstance(old_default, str):
                         if old_default.startswith('$encrypted$'):
                             encryptedish_default_exists = True
                         elif old_default == "":  # unencrypted blank string is allowed as DB value as special case
@@ -3076,8 +3074,8 @@ class WorkflowJobTemplateCopy(WorkflowsEnforcementMixin, CopyAPIView):
                 elif field_name in ['credentials']:
                     for cred in item.all():
                         if not user.can_access(cred.__class__, 'use', cred):
-                            logger.debug(six.text_type(
-                                'Deep copy: removing {} from relationship due to permissions').format(cred))
+                            logger.debug(
+                                'Deep copy: removing {} from relationship due to permissions'.format(cred))
                             item.remove(cred.pk)
             obj.save()
 

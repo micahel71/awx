@@ -7,7 +7,6 @@ import json
 import logging
 import operator
 import re
-import six
 import urllib.parse
 from collections import OrderedDict
 from datetime import timedelta
@@ -1046,7 +1045,7 @@ class BaseOAuth2TokenSerializer(BaseSerializer):
         return ret
 
     def _is_valid_scope(self, value):
-        if not value or (not isinstance(value, six.string_types)):
+        if not value or (not isinstance(value, str)):
             return False
         words = value.split()
         for word in words:
@@ -2175,10 +2174,12 @@ class InventorySourceUpdateSerializer(InventorySourceSerializer):
 
 class InventoryUpdateSerializer(UnifiedJobSerializer, InventorySourceOptionsSerializer):
 
+    custom_virtualenv = serializers.ReadOnlyField()
+
     class Meta:
         model = InventoryUpdate
         fields = ('*', 'inventory', 'inventory_source', 'license_error', 'source_project_update',
-                  '-controller_node',)
+                  'custom_virtualenv', '-controller_node',)
 
     def get_related(self, obj):
         res = super(InventoryUpdateSerializer, self).get_related(obj)
@@ -2205,6 +2206,44 @@ class InventoryUpdateSerializer(UnifiedJobSerializer, InventorySourceOptionsSeri
             res['credentials'] = self.reverse('api:inventory_update_credentials_list', kwargs={'pk': obj.pk})
 
         return res
+
+
+class InventoryUpdateDetailSerializer(InventoryUpdateSerializer):
+
+    source_project = serializers.SerializerMethodField(
+        help_text=_('The project used for this job.'),
+        method_name='get_source_project_id'
+    )
+
+    class Meta:
+        model = InventoryUpdate
+        fields = ('*', 'source_project',)
+
+    def get_source_project(self, obj):
+        return getattrd(obj, 'source_project_update.unified_job_template', None)
+
+    def get_source_project_id(self, obj):
+        return getattrd(obj, 'source_project_update.unified_job_template.id', None)
+
+    def get_related(self, obj):
+        res = super(InventoryUpdateDetailSerializer, self).get_related(obj)
+        source_project_id = self.get_source_project_id(obj)
+
+        if source_project_id:
+            res['source_project'] = self.reverse('api:project_detail', kwargs={'pk': source_project_id})
+        return res
+
+    def get_summary_fields(self, obj):
+        summary_fields = super(InventoryUpdateDetailSerializer, self).get_summary_fields(obj)
+        summary_obj = self.get_source_project(obj)
+
+        if summary_obj:
+            summary_fields['source_project'] = {}
+            for field in SUMMARIZABLE_FK_FIELDS['project']:
+                value = getattr(summary_obj, field, None)
+                if value is not None:
+                    summary_fields['source_project'][field] = value
+        return summary_fields
 
 
 class InventoryUpdateListSerializer(InventoryUpdateSerializer, UnifiedJobListSerializer):
@@ -2476,8 +2515,7 @@ class CredentialTypeSerializer(BaseSerializer):
 
 
 # TODO: remove when API v1 is removed
-@six.add_metaclass(BaseSerializerMetaclass)
-class V1CredentialFields(BaseSerializer):
+class V1CredentialFields(BaseSerializer, metaclass=BaseSerializerMetaclass):
 
     class Meta:
         model = Credential
@@ -2495,8 +2533,7 @@ class V1CredentialFields(BaseSerializer):
         return super(V1CredentialFields, self).build_field(field_name, info, model_class, nested_depth)
 
 
-@six.add_metaclass(BaseSerializerMetaclass)
-class V2CredentialFields(BaseSerializer):
+class V2CredentialFields(BaseSerializer, metaclass=BaseSerializerMetaclass):
 
     class Meta:
         model = Credential
@@ -2784,8 +2821,7 @@ class LabelsListMixin(object):
 
 
 # TODO: remove when API v1 is removed
-@six.add_metaclass(BaseSerializerMetaclass)
-class V1JobOptionsSerializer(BaseSerializer):
+class V1JobOptionsSerializer(BaseSerializer, metaclass=BaseSerializerMetaclass):
 
     class Meta:
         model = Credential
@@ -2799,8 +2835,7 @@ class V1JobOptionsSerializer(BaseSerializer):
         return super(V1JobOptionsSerializer, self).build_field(field_name, info, model_class, nested_depth)
 
 
-@six.add_metaclass(BaseSerializerMetaclass)
-class LegacyCredentialFields(BaseSerializer):
+class LegacyCredentialFields(BaseSerializer, metaclass=BaseSerializerMetaclass):
 
     class Meta:
         model = Credential
@@ -3293,10 +3328,11 @@ class JobDetailSerializer(JobSerializer):
     playbook_counts = serializers.SerializerMethodField(
         help_text=_('A count of all plays and tasks for the job run.'),
     )
+    custom_virtualenv = serializers.ReadOnlyField()
 
     class Meta:
         model = Job
-        fields = ('*', 'host_status_counts', 'playbook_counts',)
+        fields = ('*', 'host_status_counts', 'playbook_counts', 'custom_virtualenv')
 
     def get_playbook_counts(self, obj):
         task_count = obj.job_events.filter(event='playbook_on_task_start').count()
@@ -4334,7 +4370,7 @@ class JobLaunchSerializer(BaseSerializer):
                             passwords_needed=cred.passwords_needed
                         )
                         if cred.credential_type.managed_by_tower and 'vault_id' in cred.credential_type.defined_fields:
-                            cred_dict['vault_id'] = cred.inputs.get('vault_id') or None
+                            cred_dict['vault_id'] = cred.get_input('vault_id', default=None)
                         defaults_dict.setdefault(field_name, []).append(cred_dict)
             else:
                 defaults_dict[field_name] = getattr(obj, field_name)
@@ -4384,7 +4420,7 @@ class JobLaunchSerializer(BaseSerializer):
                 errors.setdefault('credentials', []).append(_(
                     'Removing {} credential at launch time without replacement is not supported. '
                     'Provided list lacked credential(s): {}.'
-                ).format(cred.unique_hash(display=True), ', '.join([six.text_type(c) for c in removed_creds])))
+                ).format(cred.unique_hash(display=True), ', '.join([str(c) for c in removed_creds])))
 
         # verify that credentials (either provided or existing) don't
         # require launch-time passwords that have not been provided
@@ -4722,8 +4758,8 @@ class ScheduleSerializer(LaunchConfigurationBaseSerializer, SchedulePreviewSeria
             raise serializers.ValidationError(_('Manual Project cannot have a schedule set.'))
         elif type(value) == InventorySource and value.source == 'scm' and value.update_on_project_update:
             raise serializers.ValidationError(_(
-                six.text_type('Inventory sources with `update_on_project_update` cannot be scheduled. '
-                              'Schedule its source project `{}` instead.').format(value.source_project.name)))
+                'Inventory sources with `update_on_project_update` cannot be scheduled. '
+                'Schedule its source project `{}` instead.'.format(value.source_project.name)))
         return value
 
 
@@ -5061,6 +5097,6 @@ class FactSerializer(BaseFactSerializer):
         ret = super(FactSerializer, self).to_representation(obj)
         if obj is None:
             return ret
-        if 'facts' in ret and isinstance(ret['facts'], six.string_types):
+        if 'facts' in ret and isinstance(ret['facts'], str):
             ret['facts'] = json.loads(ret['facts'])
         return ret

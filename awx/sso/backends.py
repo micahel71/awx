@@ -6,7 +6,6 @@ import logging
 import uuid
 
 import ldap
-import six
 
 # Django
 from django.dispatch import receiver
@@ -68,9 +67,6 @@ class LDAPBackend(BaseLDAPBackend):
         self._dispatch_uid = uuid.uuid4()
         super(LDAPBackend, self).__init__(*args, **kwargs)
         setting_changed.connect(self._on_setting_changed, dispatch_uid=self._dispatch_uid)
-
-    def __del__(self):
-        setting_changed.disconnect(dispatch_uid=self._dispatch_uid)
 
     def _on_setting_changed(self, sender, **kwargs):
         # If any AUTH_LDAP_* setting changes, force settings to be reloaded for
@@ -261,7 +257,7 @@ class TowerSAMLIdentityProvider(BaseSAMLIdentityProvider):
 
     def get_user_permanent_id(self, attributes):
         uid = attributes[self.conf.get('attr_user_permanent_id', OID_USERID)]
-        if isinstance(uid, six.string_types):
+        if isinstance(uid, str):
             return uid
         return uid[0]
 
@@ -280,7 +276,7 @@ class TowerSAMLIdentityProvider(BaseSAMLIdentityProvider):
             logger.warn("Could not map user detail '%s' from SAML attribute '%s'; "
                         "update SOCIAL_AUTH_SAML_ENABLED_IDPS['%s']['%s'] with the correct SAML attribute.",
                         conf_key[5:], key, self.name, conf_key)
-        return six.text_type(value) if value is not None else value
+        return str(value) if value is not None else value
 
 
 class SAMLAuth(BaseSAMLAuth):
@@ -333,10 +329,10 @@ def _update_m2m_from_groups(user, ldap_user, rel, opts, remove=True):
     elif opts is True:
         should_add = True
     else:
-        if isinstance(opts, six.string_types):
+        if isinstance(opts, str):
             opts = [opts]
         for group_dn in opts:
-            if not isinstance(group_dn, six.string_types):
+            if not isinstance(group_dn, str):
                 continue
             if ldap_user._get_groups().is_member_of(group_dn):
                 should_add = True
@@ -369,9 +365,9 @@ def on_populate_user(sender, **kwargs):
         field_len = len(getattr(user, field))
         if field_len > max_len:
             setattr(user, field, getattr(user, field)[:max_len])
-            logger.warn(six.text_type(
-                'LDAP user {} has {} > max {} characters'
-            ).format(user.username, field, max_len))
+            logger.warn(
+                'LDAP user {} has {} > max {} characters'.format(user.username, field, max_len)
+            )
 
     # Update organization membership based on group memberships.
     org_map = getattr(backend.settings, 'ORGANIZATION_MAP', {})

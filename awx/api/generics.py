@@ -5,7 +5,6 @@
 import inspect
 import logging
 import time
-import six
 import urllib.parse
 
 # Django
@@ -31,9 +30,6 @@ from rest_framework import views
 from rest_framework.permissions import AllowAny
 from rest_framework.renderers import StaticHTMLRenderer, JSONRenderer
 from rest_framework.negotiation import DefaultContentNegotiation
-
-# cryptography
-from cryptography.fernet import InvalidToken
 
 # AWX
 from awx.api.filters import FieldLookupBackend
@@ -90,7 +86,7 @@ class LoggedLoginView(auth_views.LoginView):
             logger.info(smart_text(u"User {} logged in.".format(self.request.user.username)))
             ret.set_cookie('userLoggedIn', 'true')
             current_user = UserSerializer(self.request.user)
-            current_user = JSONRenderer().render(current_user.data)
+            current_user = smart_text(JSONRenderer().render(current_user.data))
             current_user = urllib.parse.quote('%s' % current_user, '')
             ret.set_cookie('current_user', current_user, secure=settings.SESSION_COOKIE_SECURE or None)
 
@@ -854,15 +850,18 @@ class CopyAPIView(GenericAPIView):
             return field_val
         if isinstance(field_val, dict):
             for sub_field in field_val:
-                if isinstance(sub_field, six.string_types) \
-                        and isinstance(field_val[sub_field], six.string_types):
+                if isinstance(sub_field, str) \
+                        and isinstance(field_val[sub_field], str):
                     try:
                         field_val[sub_field] = decrypt_field(obj, field_name, sub_field)
-                    except InvalidToken:
+                    except AttributeError:
                         # Catching the corner case with v1 credential fields
                         field_val[sub_field] = decrypt_field(obj, sub_field)
-        elif isinstance(field_val, six.string_types):
-            field_val = decrypt_field(obj, field_name)
+        elif isinstance(field_val, str):
+            try:
+                field_val = decrypt_field(obj, field_name)
+            except AttributeError:
+                return field_val
         return field_val
 
     def _build_create_dict(self, obj):
@@ -916,7 +915,7 @@ class CopyAPIView(GenericAPIView):
                     obj, field.name, field_val
                 )
         new_obj = model.objects.create(**create_kwargs)
-        logger.debug(six.text_type('Deep copy: Created new object {}({})').format(
+        logger.debug('Deep copy: Created new object {}({})'.format(
             new_obj, model
         ))
         # Need to save separatedly because Djang-crum get_current_user would

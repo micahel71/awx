@@ -39,10 +39,15 @@ function JobStatusService (moment, message) {
             elapsed: model.get('elapsed'),
             started: model.get('started'),
             finished: model.get('finished'),
+            environment: model.get('custom_virtualenv'),
             scm: {
                 id: model.get('summary_fields.project_update.id'),
                 status: model.get('summary_fields.project_update.status')
             },
+            inventoryScm: {
+                id: model.get('source_project_update'),
+                status: model.get('summary_fields.inventory_source.status')
+            }
         };
 
         this.initHostStatusCounts({ model });
@@ -85,6 +90,7 @@ function JobStatusService (moment, message) {
     this.pushStatusEvent = data => {
         const isJobStatusEvent = (this.job === data.unified_job_id);
         const isProjectStatusEvent = (this.project && (this.project === data.project_id));
+        const isInventoryScmStatus = (this.model.get('source_project_update') === data.unified_job_id);
 
         if (isJobStatusEvent) {
             this.setJobStatus(data.status);
@@ -92,6 +98,10 @@ function JobStatusService (moment, message) {
         } else if (isProjectStatusEvent) {
             this.setProjectStatus(data.status);
             this.setProjectUpdateId(data.unified_job_id);
+            this.dispatch();
+        } else if (isInventoryScmStatus) {
+            this.setInventoryScmStatus(data.status);
+            this.setInventoryScmId(data.unified_job_id);
             this.dispatch();
         }
     };
@@ -248,11 +258,25 @@ function JobStatusService (moment, message) {
         this.state.scm.id = id;
     };
 
+    this.setInventoryScmStatus = status => {
+        this.state.inventoryScm.status = status;
+    };
+
+    this.setInventoryScmId = id => {
+        this.state.inventoryScm.id = id;
+    };
+
     this.setFinished = time => {
         if (!time) return;
 
         this.state.finished = time;
         this.updateRunningState();
+    };
+
+    this.setEnvironment = env => {
+        if (!env) return;
+
+        this.state.environment = env;
     };
 
     this.setStatsEvent = data => {
@@ -296,6 +320,7 @@ function JobStatusService (moment, message) {
                 this.setElapsed(model.get('elapsed'));
                 this.setStarted(model.get('started'));
                 this.setJobStatus(model.get('status'));
+                this.setEnvironment(model.get('custom_virtualenv'));
 
                 this.initHostStatusCounts({ model });
                 this.initPlaybookCounts({ model });

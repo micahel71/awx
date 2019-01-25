@@ -3,7 +3,6 @@ import hashlib
 import logging
 from collections import namedtuple
 
-import six
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.backends import default_backend
 from django.utils.encoding import smart_str, smart_bytes
@@ -63,7 +62,13 @@ def encrypt_field(instance, field_name, ask=False, subfield=None):
     '''
     Return content of the given instance and field name encrypted.
     '''
-    value = getattr(instance, field_name)
+    try:
+        value = instance.inputs[field_name]
+    except (TypeError, AttributeError):
+        value = getattr(instance, field_name)
+    except KeyError:
+        raise AttributeError(field_name)
+
     if isinstance(value, dict) and subfield is not None:
         value = value[subfield]
     if value is None:
@@ -98,7 +103,13 @@ def decrypt_field(instance, field_name, subfield=None):
     '''
     Return content of the given instance and field name decrypted.
     '''
-    value = getattr(instance, field_name)
+    try:
+        value = instance.inputs[field_name]
+    except (TypeError, AttributeError):
+        value = getattr(instance, field_name)
+    except KeyError:
+        raise AttributeError(field_name)
+
     if isinstance(value, dict) and subfield is not None:
         value = value[subfield]
     value = smart_str(value)
@@ -132,6 +143,6 @@ def encrypt_dict(data, fields):
 
 
 def is_encrypted(value):
-    if not isinstance(value, six.string_types):
+    if not isinstance(value, str):
         return False
     return value.startswith('$encrypted$') and len(value) > len('$encrypted$')

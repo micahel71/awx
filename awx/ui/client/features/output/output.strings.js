@@ -22,6 +22,8 @@ function OutputStrings (BaseString) {
         EXPAND_OUTPUT: t.s('Expand Output'),
         EXTRA_VARS: t.s('Read-only view of extra variables added to the job template'),
         INVENTORY: t.s('View the Inventory'),
+        INVENTORY_SCM: t.s('View the Project'),
+        INVENTORY_SCM_JOB: t.s('View Project checkout results'),
         JOB_TEMPLATE: t.s('View the Job Template'),
         SLICE_JOB_DETAILS: t.s('Job is one of several from a JT that slices on inventory'),
         PROJECT: t.s('View the Project'),
@@ -48,11 +50,13 @@ function OutputStrings (BaseString) {
 
     ns.labels = {
         CREDENTIAL: t.s('Credential'),
+        ENVIRONMENT: t.s('Environment'),
         EXTRA_VARS: t.s('Extra Variables'),
         FINISHED: t.s('Finished'),
         FORKS: t.s('Forks'),
         INSTANCE_GROUP: t.s('Instance Group'),
         INVENTORY: t.s('Inventory'),
+        INVENTORY_SCM: t.s('Source Project'),
         JOB_EXPLANATION: t.s('Explanation'),
         JOB_TAGS: t.s('Job Tags'),
         JOB_TEMPLATE: t.s('Job Template'),

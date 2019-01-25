@@ -198,6 +198,27 @@
     </div>
 </div>
 
+<!-- INVENTORY SCM DETAIL -->
+<div class="JobResults-resultRow" ng-if="!vm.project && vm.inventoryScm">
+    <label class="JobResults-resultRowLabel">{{ vm.inventoryScm.label }}</label>
+    <div class="JobResults-resultRowText">
+        <span>
+            <a href="{{ vm.inventoryScm.jobLink }}"
+                aw-tool-tip="{{ vm.inventoryScm.jobTooltip }}"
+                data-placement="top">
+                <i class="JobResults-statusResultIcon {{ vm.inventoryScm.icon }}"></i>
+            </a>
+        </span>
+        <span>
+            <a href="{{ vm.inventoryScm.link }}"
+                aw-tool-tip="{{ vm.inventoryScm.tooltip }}"
+                data-placement="top">
+                {{ vm.inventoryScm.value }}
+            </a>
+        </span>
+    </div>
+</div>
+
 <!-- REVISION DETAIL -->
 <div class="JobResults-resultRow" ng-if="vm.scmRevision">
     <label class="JobResults-resultRowLabel">{{ vm.scmRevision.label }}</label>
@@ -266,6 +287,12 @@
 <div class="JobResults-resultRow" ng-if="vm.verbosity">
     <label class="JobResults-resultRowLabel">{{ vm.verbosity.label }}</label>
     <div class="JobResults-resultRowText">{{ vm.verbosity.value }}</div>
+</div>
+
+<!-- ENVIRONMENT DETAIL -->
+<div class="JobResults-resultRow" ng-if="vm.environment">
+    <label class="JobResults-resultRowLabel">{{ vm.environment.label }}</label>
+    <div class="JobResults-resultRowText">{{ vm.environment.value }}</div>
 </div>
 
 <!-- IG DETAIL -->

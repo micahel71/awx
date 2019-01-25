@@ -14,7 +14,6 @@ from backports.tempfile import TemporaryDirectory
 import fcntl
 from unittest import mock
 import pytest
-import six
 import yaml
 
 from django.conf import settings
@@ -108,13 +107,16 @@ def test_safe_env_returns_new_copy():
 
 def test_openstack_client_config_generation(mocker):
     update = tasks.RunInventoryUpdate()
-    credential = mocker.Mock(**{
+    credential_type = CredentialType.defaults['openstack']()
+    inputs = {
         'host': 'https://keystone.openstack.example.org',
         'username': 'demo',
         'password': 'secrete',
         'project': 'demo-project',
         'domain': 'my-demo-domain',
-    })
+    }
+    credential = Credential(pk=1, credential_type=credential_type, inputs=inputs)
+
     cred_method = mocker.Mock(return_value=credential)
     inventory_update = mocker.Mock(**{
         'source': 'openstack',
@@ -144,13 +146,16 @@ def test_openstack_client_config_generation(mocker):
 ])
 def test_openstack_client_config_generation_with_private_source_vars(mocker, source, expected):
     update = tasks.RunInventoryUpdate()
-    credential = mocker.Mock(**{
+    credential_type = CredentialType.defaults['openstack']()
+    inputs = {
         'host': 'https://keystone.openstack.example.org',
         'username': 'demo',
         'password': 'secrete',
         'project': 'demo-project',
         'domain': None,
-    })
+    }
+    credential = Credential(pk=1, credential_type=credential_type, inputs=inputs)
+
     cred_method = mocker.Mock(return_value=credential)
     inventory_update = mocker.Mock(**{
         'source': 'openstack',
@@ -1556,7 +1561,7 @@ class TestJobCredentials(TestJobExecution):
         self.task.run(self.pk)
 
     def test_custom_environment_injectors_with_unicode_content(self):
-        value = six.u('Iñtërnâtiônàlizætiøn')
+        value = 'Iñtërnâtiônàlizætiøn'
         some_cloud = CredentialType(
             kind='cloud',
             name='SomeCloud',
@@ -1650,6 +1655,7 @@ class TestJobCredentials(TestJobExecution):
                 'password': 'secret'
             }
         )
+        azure_rm_credential.inputs['secret'] = ''
         azure_rm_credential.inputs['secret'] = encrypt_field(azure_rm_credential, 'secret')
         self.instance.credentials.add(azure_rm_credential)
 
@@ -2083,6 +2089,7 @@ class TestInventoryUpdateCredentials(TestJobExecution):
                     'host': 'https://keystone.example.org'
                 }
             )
+            cred.inputs['ssh_key_data'] = ''
             cred.inputs['ssh_key_data'] = encrypt_field(
                 cred, 'ssh_key_data'
             )

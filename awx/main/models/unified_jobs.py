@@ -12,7 +12,6 @@ import socket
 import subprocess
 import tempfile
 from collections import OrderedDict
-import six
 
 # Django
 from django.conf import settings
@@ -351,8 +350,8 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
         validated_kwargs = kwargs.copy()
         if unallowed_fields:
             if parent_field_name is None:
-                logger.warn(six.text_type('Fields {} are not allowed as overrides to spawn from {}.').format(
-                    six.text_type(', ').join(unallowed_fields), self
+                logger.warn('Fields {} are not allowed as overrides to spawn from {}.'.format(
+                    ', '.join(unallowed_fields), self
                 ))
             for f in unallowed_fields:
                 validated_kwargs.pop(f)
@@ -1305,9 +1304,9 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
                     'dispatcher', self.execution_node
                 ).running(timeout=timeout)
             except socket.timeout:
-                logger.error(six.text_type(
-                    'could not reach dispatcher on {} within {}s'
-                ).format(self.execution_node, timeout))
+                logger.error('could not reach dispatcher on {} within {}s'.format(
+                    self.execution_node, timeout
+                ))
                 running = False
         return running
 
@@ -1374,14 +1373,13 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
 
         created_by = getattr_dne(self, 'created_by')
 
-        if not created_by:
-            wj = self.get_workflow_job()
-            if wj:
-                for name in ('awx', 'tower'):
-                    r['{}_workflow_job_id'.format(name)] = wj.pk
-                    r['{}_workflow_job_name'.format(name)] = wj.name
-                created_by = getattr_dne(wj, 'created_by')
+        wj = self.get_workflow_job()
+        if wj:
+            for name in ('awx', 'tower'):
+                r['{}_workflow_job_id'.format(name)] = wj.pk
+                r['{}_workflow_job_name'.format(name)] = wj.name
 
+        if not created_by:
             schedule = getattr_dne(self, 'schedule')
             if schedule:
                 for name in ('awx', 'tower'):

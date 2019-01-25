@@ -7,7 +7,6 @@ import os
 import re
 import stat
 import tempfile
-import six
 
 # Jinja2
 from jinja2 import Template
@@ -325,10 +324,11 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
 
     @property
     def has_encrypted_ssh_key_data(self):
-        if self.pk:
+        try:
             ssh_key_data = decrypt_field(self, 'ssh_key_data')
-        else:
-            ssh_key_data = self.ssh_key_data
+        except AttributeError:
+            return False
+
         try:
             pem_objects = validate_ssh_private_key(ssh_key_data)
             for pem_object in pem_objects:
@@ -383,7 +383,7 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
         super(Credential, self).save(*args, **kwargs)
 
     def encrypt_field(self, field, ask):
-        if not hasattr(self, field):
+        if field not in self.inputs:
             return None
         encrypted = encrypt_field(self, field, ask=ask)
         if encrypted:
@@ -415,13 +415,13 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
             type_alias = self.credential_type.name
         else:
             type_alias = self.credential_type_id
-        if self.kind == 'vault' and self.inputs.get('vault_id', None):
+        if self.kind == 'vault' and self.has_input('vault_id'):
             if display:
-                fmt_str = six.text_type('{} (id={})')
+                fmt_str = '{} (id={})'
             else:
-                fmt_str = six.text_type('{}_{}')
-            return fmt_str.format(type_alias, self.inputs.get('vault_id'))
-        return six.text_type(type_alias)
+                fmt_str = '{}_{}'
+            return fmt_str.format(type_alias, self.get_input('vault_id'))
+        return str(type_alias)
 
     @staticmethod
     def unique_dict(cred_qs):
@@ -429,6 +429,34 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
         for cred in cred_qs:
             ret[cred.unique_hash()] = cred
         return ret
+
+    def get_input(self, field_name, **kwargs):
+        """
+        Get an injectable and decrypted value for an input field.
+
+        Retrieves the value for a given credential input field name. Return
+        values for secret input fields are decrypted. If the credential doesn't
+        have an input value defined for the given field name, an AttributeError
+        is raised unless a default value is provided.
+
+        :param field_name(str):        The name of the input field.
+        :param default(optional[str]): A default return value to use.
+        """
+        if field_name in self.credential_type.secret_fields:
+            try:
+                return decrypt_field(self, field_name)
+            except AttributeError:
+                if 'default' in kwargs:
+                    return kwargs['default']
+                raise AttributeError
+        if field_name in self.inputs:
+            return self.inputs[field_name]
+        if 'default' in kwargs:
+            return kwargs['default']
+        raise AttributeError(field_name)
+
+    def has_input(self, field_name):
+        return field_name in self.inputs and self.inputs[field_name] not in ('', None)
 
 
 class CredentialType(CommonModelNameNotUnique):
@@ -611,8 +639,9 @@ class CredentialType(CommonModelNameNotUnique):
                 safe_namespace[field_name] = namespace[field_name] = value
                 continue
 
+            value = credential.get_input(field_name)
+
             if field_name in self.secret_fields:
-                value = decrypt_field(credential, field_name)
                 safe_namespace[field_name] = '**********'
             elif len(value):
                 safe_namespace[field_name] = value
@@ -649,9 +678,7 @@ class CredentialType(CommonModelNameNotUnique):
             try:
                 injector_field.validate_env_var_allowed(env_var)
             except ValidationError as e:
-                logger.error(six.text_type(
-                    'Ignoring prohibited env var {}, reason: {}'
-                ).format(env_var, e))
+                logger.error('Ignoring prohibited env var {}, reason: {}'.format(env_var, e))
                 continue
             env[env_var] = Template(tmpl).render(**namespace)
             safe_env[env_var] = Template(tmpl).render(**safe_namespace)
