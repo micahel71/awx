@@ -51,6 +51,7 @@ function OutputStrings (BaseString) {
     ns.labels = {
         CREDENTIAL: t.s('Credential'),
         ENVIRONMENT: t.s('Environment'),
+        EXECUTION_NODE: t.s('Execution Node'),
         EXTRA_VARS: t.s('Extra Variables'),
         FINISHED: t.s('Finished'),
         FORKS: t.s('Forks'),
@@ -118,6 +119,12 @@ function OutputStrings (BaseString) {
         NO_RESULT_FOUND: t.s('No result found'),
         STANDARD_OUT: t.s('Standard Out'),
         STANDARD_ERROR: t.s('Standard Error')
+    };
+
+    ns.workflow_status = {
+        SUCCESSFUL: t.s('SUCCESSFUL'),
+        FAILED: t.s('FAILED'),
+        NO_JOBS_FINISHED: t.s('NO JOBS FINISHED')
     };
 }
 

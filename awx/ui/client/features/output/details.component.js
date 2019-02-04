@@ -114,13 +114,14 @@ function getVerbosityDetails () {
 }
 
 function getEnvironmentDetails (virtualenv) {
-    const value = virtualenv || resource.model.get('custom_virtualenv');
+    const customVirtualenv = virtualenv || resource.model.get('custom_virtualenv');
 
-    if (!value || value === '') {
+    if (!customVirtualenv || customVirtualenv === '') {
         return null;
     }
 
     const label = strings.get('labels.ENVIRONMENT');
+    const value = $filter('sanitize')(customVirtualenv);
 
     return { label, value };
 }
@@ -345,6 +346,7 @@ function getInventoryScmDetails (updateId, updateStatus) {
     const link = `/#/projects/${projectId}`;
     const jobTooltip = strings.get('tooltips.INVENTORY_SCM_JOB');
     const tooltip = strings.get('tooltips.INVENTORY_SCM');
+    const value = $filter('sanitize')(projectName);
 
     let icon;
 
@@ -354,7 +356,7 @@ function getInventoryScmDetails (updateId, updateStatus) {
         icon = `fa icon-job-${status}`;
     }
 
-    return { label, link, icon, jobLink, jobTooltip, tooltip, value: projectName };
+    return { label, link, icon, jobLink, jobTooltip, tooltip, value };
 }
 
 function getSCMRevisionDetails () {
@@ -477,6 +479,19 @@ function getLimitDetails () {
     if (!value) {
         return null;
     }
+
+    return { label, value };
+}
+
+function getExecutionNodeDetails (node) {
+    const executionNode = node || resource.model.get('execution_node');
+
+    if (!executionNode) {
+        return null;
+    }
+
+    const label = strings.get('labels.EXECUTION_NODE');
+    const value = $filter('sanitize')(executionNode);
 
     return { label, value };
 }
@@ -761,6 +776,7 @@ function JobDetailsController (
         vm.credentials = getCredentialDetails();
         vm.forks = getForkDetails();
         vm.limit = getLimitDetails();
+        vm.executionNode = getExecutionNodeDetails();
         vm.instanceGroup = getInstanceGroupDetails();
         vm.jobTags = getJobTagDetails();
         vm.skipTags = getSkipTagDetails();
@@ -782,12 +798,21 @@ function JobDetailsController (
         vm.toggleLabels = toggleLabels;
         vm.showLabels = showLabels;
 
-        unsubscribe = subscribe(({ status, started, finished, scm, inventoryScm, environment }) => {
+        unsubscribe = subscribe(({
+            status,
+            started,
+            finished,
+            scm,
+            inventoryScm,
+            environment,
+            executionNode
+        }) => {
             vm.started = getStartDetails(started);
             vm.finished = getFinishDetails(finished);
             vm.projectUpdate = getProjectUpdateDetails(scm.id);
             vm.projectStatus = getProjectStatusDetails(scm.status);
             vm.environment = getEnvironmentDetails(environment);
+            vm.executionNode = getExecutionNodeDetails(executionNode);
             vm.inventoryScm = getInventoryScmDetails(inventoryScm.id, inventoryScm.status);
             vm.status = getStatusDetails(status);
             vm.job.status = status;
