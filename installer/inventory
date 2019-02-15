@@ -53,7 +53,7 @@ dockerhub_version=latest
 awx_task_hostname=awx
 awx_web_hostname=awxweb
 postgres_data_dir=/var/lib/pgdocker
-host_port=8081
+host_port=81
 
 # Docker Compose Install
 # use_docker_compose=false
@@ -109,7 +109,7 @@ admin_user=admin
 admin_password=password
 
 # Whether or not to create preload data for demonstration purposes
-create_preload_data=True
+create_preload_data=False
 
 # AWX Secret key
 # It's *very* important that this stay the same between upgrades or you will lose the ability to decrypt
