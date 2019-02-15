@@ -33,9 +33,15 @@ from awx.main.fields import (
     SmartFilterField,
 )
 from awx.main.managers import HostManager
-from awx.main.models.base import * # noqa
+from awx.main.models.base import (
+    BaseModel,
+    CommonModelNameNotUnique,
+    VarsDictProperty,
+    CLOUD_INVENTORY_SOURCES,
+    prevent_search
+)
 from awx.main.models.events import InventoryUpdateEvent
-from awx.main.models.unified_jobs import * # noqa
+from awx.main.models.unified_jobs import UnifiedJob, UnifiedJobTemplate
 from awx.main.models.mixins import (
     ResourceMixin,
     TaskManagerInventoryUpdateMixin,
@@ -239,7 +245,7 @@ class Inventory(CommonModelNameNotUnique, ResourceMixin, RelatedJobsMixin):
         hosts_kw = dict()
         if not show_all:
             hosts_kw['enabled'] = True
-        fetch_fields = ['name', 'id', 'variables']
+        fetch_fields = ['name', 'id', 'variables', 'inventory_id']
         if towervars:
             fetch_fields.append('enabled')
         hosts = self.hosts.filter(**hosts_kw).order_by('name').only(*fetch_fields)
@@ -1743,6 +1749,10 @@ class InventoryUpdate(UnifiedJob, InventorySourceOptions, JobNotificationMixin, 
 
     @property
     def ansible_virtualenv_path(self):
+        if self.inventory_source and self.inventory_source.source_project:
+            project = self.inventory_source.source_project
+            if project and project.custom_virtualenv:
+                return project.custom_virtualenv
         if self.inventory_source and self.inventory_source.inventory:
             organization = self.inventory_source.inventory.organization
             if organization and organization.custom_virtualenv:

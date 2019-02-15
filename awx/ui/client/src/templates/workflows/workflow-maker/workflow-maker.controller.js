@@ -5,12 +5,12 @@
  *************************************************/
 
 export default ['$scope', 'TemplatesService',
-    'ProcessErrors', 'CreateSelect2', '$q', 'JobTemplateModel',
-    'Empty', 'PromptService', 'Rest', 'TemplatesStrings', 'WorkflowChartService',
+    'ProcessErrors', '$q',
+    'PromptService', 'TemplatesStrings', 'WorkflowChartService',
     'Wait', '$state',
     function ($scope, TemplatesService,
-        ProcessErrors, CreateSelect2, $q, JobTemplate,
-        Empty, PromptService, Rest, TemplatesStrings, WorkflowChartService,
+        ProcessErrors, $q,
+        PromptService, TemplatesStrings, WorkflowChartService,
         Wait, $state
     ) {
 
@@ -159,6 +159,11 @@ export default ['$scope', 'TemplatesService',
                                     });
                                 });
                             }
+                        }).catch(({ data, status }) => {
+                            Wait('stop');
+                            ProcessErrors($scope, data, status, null, {
+                                hdr: $scope.strings.get('error.HEADER')
+                            });
                         }));
                     } else if (nodeRef[workflowMakerNodeId].isEdited) {
                         editPromises.push(TemplatesService.editWorkflowNode({
@@ -360,14 +365,26 @@ export default ['$scope', 'TemplatesService',
                                     .then(() => {
                                         Wait('stop');
                                         $scope.closeDialog();
+                                    }).catch(({ data, status }) => {
+                                        Wait('stop');
+                                        ProcessErrors($scope, data, status, null, {
+                                            hdr: $scope.strings.get('error.HEADER')
+                                        });
                                     });
                             }).catch(({
                                 data,
                                 status
                             }) => {
                                 Wait('stop');
-                                ProcessErrors($scope, data, status, null, {});
+                                ProcessErrors($scope, data, status, null, {
+                                    hdr: $scope.strings.get('error.HEADER')
+                                });
                             });
+                    }).catch(({ data, status }) => {
+                        Wait('stop');
+                        ProcessErrors($scope, data, status, null, {
+                            hdr: $scope.strings.get('error.HEADER')
+                        });
                     });
 
             } else {
@@ -381,6 +398,11 @@ export default ['$scope', 'TemplatesService',
                         Wait('stop');
                         $scope.closeDialog();
                         $state.transitionTo('templates');
+                    }).catch(({ data, status }) => {
+                        Wait('stop');
+                        ProcessErrors($scope, data, status, null, {
+                            hdr: $scope.strings.get('error.HEADER')
+                        });
                     });
             }
         };
@@ -404,7 +426,10 @@ export default ['$scope', 'TemplatesService',
             $scope.graphState.nodeBeingAdded = workflowMakerNodeIdCounter;
 
             $scope.graphState.arrayOfLinksForChart.push({
-                source: {id: parent.id},
+                source: {
+                    id: parent.id,
+                    unifiedJobTemplate: parent.unifiedJobTemplate
+                },
                 target: {id: workflowMakerNodeIdCounter},
                 edgeType: "placeholder"
             });
@@ -439,7 +464,10 @@ export default ['$scope', 'TemplatesService',
             $scope.graphState.nodeBeingAdded = workflowMakerNodeIdCounter;
 
             $scope.graphState.arrayOfLinksForChart.push({
-                source: {id: link.source.id},
+                source: {
+                    id: link.source.id,
+                    unifiedJobTemplate: link.source.unifiedJobTemplate
+                },
                 target: {id: workflowMakerNodeIdCounter},
                 edgeType: "placeholder"
             });
@@ -480,6 +508,7 @@ export default ['$scope', 'TemplatesService',
                     $scope.graphState.arrayOfLinksForChart.map( (link) => {
                         if (link.target.id === nodeId) {
                             link.edgeType = edgeType.value;
+                            link.target.unifiedJobTemplate = selectedTemplate;
                         }
                     });
                 }
@@ -489,6 +518,15 @@ export default ['$scope', 'TemplatesService',
                     nodeRef[$scope.nodeConfig.nodeId].promptData = _.cloneDeep(promptData);
                     nodeRef[$scope.nodeConfig.nodeId].isEdited = true;
                     $scope.graphState.nodeBeingEdited = null;
+
+                    $scope.graphState.arrayOfLinksForChart.map( (link) => {
+                        if (link.target.id === nodeId) {
+                            link.target.unifiedJobTemplate = selectedTemplate;
+                        }
+                        if (link.source.id === nodeId) {
+                            link.source.unifiedJobTemplate = selectedTemplate;
+                        }
+                    });
                 }
             }
 
@@ -815,6 +853,10 @@ export default ['$scope', 'TemplatesService',
 
                 if ($scope.linkConfig) {
                     $scope.cancelLinkForm();
+                }
+
+                if ($scope.nodeConfig && $scope.nodeConfig.nodeId === nodeId) {
+                    $scope.cancelNodeForm();
                 }
 
                 // Remove the node from the array

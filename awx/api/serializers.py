@@ -45,9 +45,23 @@ from awx.main.constants import (
     ACTIVE_STATES,
     CENSOR_VALUE,
 )
-from awx.main.models import * # noqa
-from awx.main.models.base import NEW_JOB_TYPE_CHOICES
-from awx.main.fields import ImplicitRoleField
+from awx.main.models import (
+    ActivityStream, AdHocCommand, AdHocCommandEvent, Credential,
+    CredentialType, CustomInventoryScript, Fact, Group, Host, Instance,
+    InstanceGroup, Inventory, InventorySource, InventoryUpdate,
+    InventoryUpdateEvent, Job, JobEvent, JobHostSummary, JobLaunchConfig,
+    JobTemplate, Label, Notification, NotificationTemplate, OAuth2AccessToken,
+    OAuth2Application, Organization, Project, ProjectUpdate,
+    ProjectUpdateEvent, RefreshToken, Role, Schedule, SystemJob,
+    SystemJobEvent, SystemJobTemplate, Team, UnifiedJob, UnifiedJobTemplate,
+    UserSessionMembership, V1Credential, WorkflowJob, WorkflowJobNode,
+    WorkflowJobTemplate, WorkflowJobTemplateNode, StdoutMaxBytesExceeded
+)
+from awx.main.models.base import VERBOSITY_CHOICES, NEW_JOB_TYPE_CHOICES
+from awx.main.models.rbac import (
+    get_roles_on_resource, role_summary_fields_generator
+)
+from awx.main.fields import ImplicitRoleField, JSONBField
 from awx.main.utils import (
     get_type_for_model, get_model_for_type, timestamp_apiformat,
     camelcase_to_underscore, getattrd, parse_yaml_or_json,
@@ -879,7 +893,7 @@ class UserSerializer(BaseSerializer):
         model = User
         fields = ('*', '-name', '-description', '-modified',
                   'username', 'first_name', 'last_name',
-                  'email', 'is_superuser', 'is_system_auditor', 'password', 'ldap_dn', 'external_account')
+                  'email', 'is_superuser', 'is_system_auditor', 'password', 'ldap_dn', 'last_login', 'external_account')
 
     def to_representation(self, obj):  # TODO: Remove in 3.3
         ret = super(UserSerializer, self).to_representation(obj)
@@ -1542,6 +1556,18 @@ class InventorySerializer(BaseSerializerWithVariables):
     def validate_host_filter(self, host_filter):
         if host_filter:
             try:
+                for match in JSONBField.get_lookups().keys():
+                    if match == 'exact':
+                        # __exact is allowed
+                        continue
+                    match = '__{}'.format(match)
+                    if re.match(
+                        'ansible_facts[^=]+{}='.format(match),
+                        host_filter
+                    ):
+                        raise models.base.ValidationError({
+                            'host_filter': 'ansible_facts does not support searching with {}'.format(match)
+                        })
                 SmartFilter().query_from_string(host_filter)
             except RuntimeError as e:
                 raise models.base.ValidationError(e)

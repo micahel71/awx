@@ -25,9 +25,16 @@ from rest_framework.exceptions import ParseError
 
 # AWX
 from awx.api.versioning import reverse
-from awx.main.models.base import * # noqa
+from awx.main.models.base import (
+    BaseModel, CreatedModifiedModel,
+    prevent_search,
+    JOB_TYPE_CHOICES, VERBOSITY_CHOICES,
+    VarsDictProperty
+)
 from awx.main.models.events import JobEvent, SystemJobEvent
-from awx.main.models.unified_jobs import * # noqa
+from awx.main.models.unified_jobs import (
+    UnifiedJobTemplate, UnifiedJob
+)
 from awx.main.models.notifications import (
     NotificationTemplate,
     JobNotificationMixin,
@@ -93,8 +100,7 @@ class JobOptions(BaseModel):
         blank=True,
         default=0,
     )
-    limit = models.CharField(
-        max_length=1024,
+    limit = models.TextField(
         blank=True,
         default='',
     )
@@ -451,7 +457,7 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
 
     @property
     def cache_timeout_blocked(self):
-        if Job.objects.filter(job_template=self, status__in=['pending', 'waiting', 'running']).count() > getattr(settings, 'SCHEDULE_MAX_JOBS', 10):
+        if Job.objects.filter(job_template=self, status__in=['pending', 'waiting', 'running']).count() >= getattr(settings, 'SCHEDULE_MAX_JOBS', 10):
             logger.error("Job template %s could not be started because there are more than %s other jobs from that template waiting to run" %
                          (self.name, getattr(settings, 'SCHEDULE_MAX_JOBS', 10)))
             return True
@@ -806,7 +812,10 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
     def get_notification_friendly_name(self):
         return "Job"
 
-    def _get_inventory_hosts(self, only=['name', 'ansible_facts', 'ansible_facts_modified', 'modified',]):
+    def _get_inventory_hosts(
+        self,
+        only=['name', 'ansible_facts', 'ansible_facts_modified', 'modified', 'inventory_id']
+    ):
         if not self.inventory:
             return []
         return self.inventory.hosts.only(*only)
