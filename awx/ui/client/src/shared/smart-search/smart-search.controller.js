@@ -1,5 +1,6 @@
 function SmartSearchController (
     $scope,
+    $rootScope,
     $state,
     $stateParams,
     $transitions,
@@ -46,7 +47,7 @@ function SmartSearchController (
                     qs.search(path, queryset).then((res) => {
                         $scope.dataset = res.data;
                         $scope.collection = res.data.results;
-                        $scope.$emit('updateDataset', res.data);
+                        $scope.$emit('updateDataset', res.data, queryset);
                     });
 
                     $scope.searchTerm = null;
@@ -77,7 +78,7 @@ function SmartSearchController (
             }
             $scope.dataset = res.data;
             $scope.collection = res.data.results;
-            $scope.$emit('updateDataset', res.data);
+            $scope.$emit('updateDataset', res.data, queryset);
         });
 
         $scope.searchTerm = null;
@@ -101,8 +102,9 @@ function SmartSearchController (
         const rootField = termParts[0].split('.')[0].replace(/^-/, '');
         const listName = $scope.list.name;
         const baseRelatedTypePath = `models.${listName}.base.${rootField}.type`;
+        const relatedTypePath = `models.${listName}.related`;
 
-        const isRelatedSearchTermField = (_.includes($scope.models[listName].related, rootField));
+        const isRelatedSearchTermField = (_.includes(_.get($scope, relatedTypePath), rootField));
         const isBaseModelRelatedSearchTermField = (_.get($scope, baseRelatedTypePath) === 'field');
 
         return (isRelatedSearchTermField || isBaseModelRelatedSearchTermField);
@@ -111,10 +113,13 @@ function SmartSearchController (
     configService.getConfig()
         .then(config => {
             let version;
-
-            try {
-                [version] = config.version.split('-');
-            } catch (err) {
+            if ($rootScope.BRAND_NAME === 'Tower') {
+                try {
+                    [version] = config.version.split('-');
+                } catch (err) {
+                    version = 'latest';
+                }
+            } else {
                 version = 'latest';
             }
 
@@ -164,7 +169,6 @@ function SmartSearchController (
                     $scope.searchPlaceholder = i18n._('Search');
                 }
             });
-
             listenForTransitionSuccess();
         });
 
@@ -198,14 +202,14 @@ function SmartSearchController (
                     });
             }
 
-            qs.search(path, queryset)
+            qs.search(path, queryset, singleSearchParam)
                 .then(({ data }) => {
                     if ($scope.querySet) {
                         $scope.querySet = queryset;
                     }
                     $scope.dataset = data;
                     $scope.collection = data.results;
-                    $scope.$emit('updateDataset', data);
+                    $scope.$emit('updateDataset', data, queryset);
                 })
                 .catch(() => revertSearch(unmodifiedQueryset));
 
@@ -241,7 +245,7 @@ function SmartSearchController (
                 }
                 $scope.dataset = data;
                 $scope.collection = data.results;
-                $scope.$emit('updateDataset', data);
+                $scope.$emit('updateDataset', data, queryset);
             });
 
         generateSearchTags();
@@ -271,7 +275,7 @@ function SmartSearchController (
                 }
                 $scope.dataset = data;
                 $scope.collection = data.results;
-                $scope.$emit('updateDataset', data);
+                $scope.$emit('updateDataset', data, queryset);
             });
 
         $scope.searchTags = qs.stripDefaultParams(queryset, defaults);
@@ -280,6 +284,7 @@ function SmartSearchController (
 
 SmartSearchController.$inject = [
     '$scope',
+    '$rootScope',
     '$state',
     '$stateParams',
     '$transitions',

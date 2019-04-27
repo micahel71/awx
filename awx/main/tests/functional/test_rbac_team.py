@@ -21,7 +21,21 @@ def test_team_attach_unattach(team, user):
     u2 = user('non-member', False)
     access = TeamAccess(u2)
     assert not access.can_attach(team, team.member_role, 'member_role.children', None)
-    assert not access.can_unattach(team, team.member_role, 'member_role.chidlren')
+    assert not access.can_unattach(team, team.member_role, 'member_role.children')
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('ext_auth', [True, False])
+def test_team_org_resource_role(ext_auth, team, user, rando):
+    with mock.patch('awx.main.access.settings') as settings_mock:
+        settings_mock.MANAGE_ORGANIZATION_AUTH = ext_auth
+        u = user('member', False)
+        team.organization.admin_role.members.add(u)
+        access = TeamAccess(u)
+
+        assert access.can_attach(team, rando, 'member_role.members') == ext_auth
+        team.member_role.members.add(rando)
+        assert access.can_unattach(team, rando, 'member_role.members') == ext_auth
 
 
 @pytest.mark.django_db
@@ -152,3 +166,18 @@ def test_org_admin_view_all_teams(org_admin, enabled):
     with mock.patch('awx.main.access.settings') as settings_mock:
         settings_mock.ORG_ADMINS_CAN_SEE_ALL_USERS = enabled
         assert access.can_read(other_team) is enabled
+
+
+@pytest.mark.django_db
+def test_team_member_read(rando, organization, team):
+    assert team.organization == organization
+    organization.member_role.members.add(rando)
+    assert TeamAccess(rando).can_read(team)
+    assert team in TeamAccess(rando).get_queryset()
+
+
+@pytest.mark.django_db
+def test_team_list_no_duplicate_entries(rando, organization, team):
+    organization.member_role.members.add(rando)
+    team.read_role.members.add(rando)
+    assert list(TeamAccess(rando).get_queryset()) == [team]

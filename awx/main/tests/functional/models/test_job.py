@@ -1,6 +1,6 @@
 import pytest
 
-from awx.main.models import JobTemplate, Job, JobHostSummary, WorkflowJob
+from awx.main.models import JobTemplate, Job, JobHostSummary, WorkflowJob, Inventory
 
 
 @pytest.mark.django_db
@@ -68,14 +68,14 @@ def test_job_host_summary_representation(host):
     job = Job.objects.create(name='foo')
     jhs = JobHostSummary.objects.create(
         host=host, job=job,
-        changed=1, dark=2, failures=3, ok=4, processed=5, skipped=6
+        changed=1, dark=2, failures=3, ignored=4, ok=5, processed=6, rescued=7, skipped=8
     )
-    assert 'single-host changed=1 dark=2 failures=3 ok=4 processed=5 skipped=6' == str(jhs)
+    assert 'single-host changed=1 dark=2 failures=3 ignored=4 ok=5 processed=6 rescued=7 skipped=8' == str(jhs)
 
     # Representation should be robust to deleted related items
     jhs = JobHostSummary.objects.get(pk=jhs.id)
     host.delete()
-    assert 'N/A changed=1 dark=2 failures=3 ok=4 processed=5 skipped=6' == str(jhs)
+    assert 'N/A changed=1 dark=2 failures=3 ignored=4 ok=5 processed=6 rescued=7 skipped=8' == str(jhs)
 
 
 @pytest.mark.django_db
@@ -96,3 +96,13 @@ class TestSlicingModels:
             assert node.limit is None  # data not saved in node prompts
             job = node.job
             assert job.limit == 'foobar'
+
+    def test_effective_slice_count(self, job_template, inventory, organization):
+        job_template.inventory = inventory
+        assert job_template.inventory.hosts.count() == 0
+        job_template.job_slice_count = 2
+        job_template.inventory.hosts.create(name='foo1')
+        assert job_template.get_effective_slice_ct({})
+        inventory2 = Inventory.objects.create(organization=organization, name='fooinv')
+        [inventory2.hosts.create(name='foo{}'.format(i)) for i in range(3)]
+        assert job_template.get_effective_slice_ct({'inventory': inventory2})

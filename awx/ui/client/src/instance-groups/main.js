@@ -183,6 +183,7 @@ function InstanceGroupsRun ($stateExtender, strings) {
     $stateExtender.addState({
         name: 'instanceGroups.instances',
         url: '/:instance_group_id/instances',
+        searchPrefix: 'instance',
         ncyBreadcrumb: {
             parent: 'instanceGroups.edit',
             label: strings.get('state.INSTANCES_BREADCRUMB_LABEL')
@@ -190,7 +191,8 @@ function InstanceGroupsRun ($stateExtender, strings) {
         params: {
             instance_search: {
                 value: {
-                    order_by: 'hostname'
+                    order_by: 'hostname',
+                    page_size: '10'
                 },
                 dynamic: true
             }
@@ -229,11 +231,13 @@ function InstanceGroupsRun ($stateExtender, strings) {
 
     $stateExtender.addState({
         name: 'instanceGroups.instances.modal.add',
+        url: '/add',
         ncyBreadcrumb: {
             skip: true,
         },
+        searchPrefix: 'add_instance',
         params: {
-            instance_search: {
+            add_instance_search: {
                 value: {
                     page_size: '10',
                     order_by: 'hostname'
@@ -253,7 +257,7 @@ function InstanceGroupsRun ($stateExtender, strings) {
             Dataset: ['GetBasePath', 'QuerySet', '$stateParams',
                 function(GetBasePath, qs, $stateParams) {
                     let path = `${GetBasePath('instances')}`;
-                    return qs.search(path, $stateParams[`instance_search`]);
+                    return qs.search(path, $stateParams[`add_instance_search`]);
                 }
             ]
         }

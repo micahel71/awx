@@ -18,7 +18,7 @@ from django.db.models.signals import (
 )
 from django.db.models.signals import m2m_changed
 from django.db import models
-from django.db.models.fields.related import add_lazy_relation
+from django.db.models.fields.related import lazy_related_operation
 from django.db.models.fields.related_descriptors import (
     ReverseOneToOneDescriptor,
     ForwardManyToOneDescriptor,
@@ -43,7 +43,10 @@ from rest_framework import serializers
 from awx.main.utils.filters import SmartFilter
 from awx.main.utils.encryption import encrypt_value, decrypt_value, get_encryption_key
 from awx.main.validators import validate_ssh_private_key
-from awx.main.models.rbac import batch_role_ancestor_rebuilding, Role
+from awx.main.models.rbac import (
+    batch_role_ancestor_rebuilding, Role,
+    ROLE_SINGLETON_SYSTEM_ADMINISTRATOR, ROLE_SINGLETON_SYSTEM_AUDITOR
+)
 from awx.main.constants import ENV_BLACKLIST
 from awx.main import utils
 
@@ -159,6 +162,13 @@ def is_implicit_parent(parent_role, child_role):
     the model definition. This does not include any role parents that
     might have been set by the user.
     '''
+    if child_role.content_object is None:
+        # The only singleton implicit parent is the system admin being
+        # a parent of the system auditor role
+        return bool(
+            child_role.singleton_name == ROLE_SINGLETON_SYSTEM_AUDITOR and 
+            parent_role.singleton_name == ROLE_SINGLETON_SYSTEM_ADMINISTRATOR
+        )
     # Get the list of implicit parents that were defined at the class level.
     implicit_parents = getattr(
         child_role.content_object.__class__, child_role.role_field
@@ -217,6 +227,7 @@ class ImplicitRoleField(models.ForeignKey):
         kwargs.setdefault('related_name', '+')
         kwargs.setdefault('null', 'True')
         kwargs.setdefault('editable', False)
+        kwargs.setdefault('on_delete', models.CASCADE)
         super(ImplicitRoleField, self).__init__(*args, **kwargs)
 
     def deconstruct(self):
@@ -234,7 +245,9 @@ class ImplicitRoleField(models.ForeignKey):
 
         post_save.connect(self._post_save, cls, True, dispatch_uid='implicit-role-post-save')
         post_delete.connect(self._post_delete, cls, True, dispatch_uid='implicit-role-post-delete')
-        add_lazy_relation(cls, self, "self", self.bind_m2m_changed)
+
+        function = lambda local, related, field: self.bind_m2m_changed(field, related, local)
+        lazy_related_operation(function, cls, "self", field=self)
 
     def bind_m2m_changed(self, _self, _role_class, cls):
         if not self.parent_role:
@@ -480,6 +493,69 @@ def format_ssh_private_key(value):
     return True
 
 
+class DynamicCredentialInputField(JSONSchemaField):
+    """
+    Used to validate JSON for
+    `awx.main.models.credential:CredentialInputSource().metadata`.
+
+    Metadata for input sources is represented as a dictionary e.g.,
+    {'secret_path': '/kv/somebody', 'secret_key': 'password'}
+
+    For the data to be valid, the keys of this dictionary should correspond
+    with the metadata field (and datatypes) defined in the associated
+    target CredentialType e.g.,
+    """
+
+    def schema(self, credential_type):
+        # determine the defined fields for the associated credential type
+        properties = {}
+        for field in credential_type.inputs.get('metadata', []):
+            field = field.copy()
+            properties[field['id']] = field
+            if field.get('choices', []):
+                field['enum'] = list(field['choices'])[:]
+        return {
+            'type': 'object',
+            'properties': properties,
+            'additionalProperties': False,
+        }
+
+    def validate(self, value, model_instance):
+        if not isinstance(value, dict):
+            return super(DynamicCredentialInputField, self).validate(value, model_instance)
+
+        super(JSONSchemaField, self).validate(value, model_instance)
+        credential_type = model_instance.source_credential.credential_type
+        errors = {}
+        for error in Draft4Validator(
+            self.schema(credential_type),
+            format_checker=self.format_checker
+        ).iter_errors(value):
+            if error.validator == 'pattern' and 'error' in error.schema:
+                error.message = error.schema['error'].format(instance=error.instance)
+            if 'id' not in error.schema:
+                # If the error is not for a specific field, it's specific to
+                # `inputs` in general
+                raise django_exceptions.ValidationError(
+                    error.message,
+                    code='invalid',
+                    params={'value': value},
+                )
+            errors[error.schema['id']] = [error.message]
+
+        defined_metadata = [field.get('id') for field in credential_type.inputs.get('metadata', [])]
+        for field in credential_type.inputs.get('required', []):
+            if field in defined_metadata and not value.get(field, None):
+                errors[field] = [_('required for %s') % (
+                    credential_type.name
+                )]
+
+        if errors:
+            raise serializers.ValidationError({
+                'metadata': errors
+            })
+
+
 class CredentialInputField(JSONSchemaField):
     """
     Used to validate JSON for
@@ -592,18 +668,13 @@ class CredentialInputField(JSONSchemaField):
                 )
             errors[error.schema['id']] = [error.message]
 
-        inputs = model_instance.credential_type.inputs
-        for field in inputs.get('required', []):
-            if not value.get(field, None):
-                errors[field] = [_('required for %s') % (
-                    model_instance.credential_type.name
-                )]
+        defined_fields = model_instance.credential_type.defined_fields
 
         # `ssh_key_unlock` requirements are very specific and can't be
         # represented without complicated JSON schema
         if (
                 model_instance.credential_type.managed_by_tower is True and
-                'ssh_key_unlock' in model_instance.credential_type.defined_fields
+                'ssh_key_unlock' in defined_fields
         ):
 
             # in order to properly test the necessity of `ssh_key_unlock`, we
@@ -671,6 +742,7 @@ class CredentialTypeInputField(JSONSchemaField):
                             'multiline': {'type': 'boolean'},
                             'secret': {'type': 'boolean'},
                             'ask_at_runtime': {'type': 'boolean'},
+                            'default': {},
                         },
                         'additionalProperties': False,
                         'required': ['id', 'label'],
@@ -713,6 +785,14 @@ class CredentialTypeInputField(JSONSchemaField):
             if 'type' not in field:
                 # If no type is specified, default to string
                 field['type'] = 'string'
+
+            if 'default' in field:
+                default = field['default']
+                _type = {'string': str, 'boolean': bool}[field['type']]
+                if type(default) != _type:
+                    raise django_exceptions.ValidationError(
+                        _('{} is not a {}').format(default, field['type'])
+                    )
 
             for key in ('choices', 'multiline', 'format', 'secret',):
                 if key in field and field['type'] != 'string':

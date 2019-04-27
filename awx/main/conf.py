@@ -21,7 +21,6 @@ register(
     help_text=_('Enable capturing activity for the activity stream.'),
     category=_('System'),
     category_slug='system',
-    feature_required='activity_streams',
 )
 
 register(
@@ -31,7 +30,6 @@ register(
     help_text=_('Enable capturing activity for the activity stream when running inventory sync.'),
     category=_('System'),
     category_slug='system',
-    feature_required='activity_streams',
 )
 
 register(
@@ -124,6 +122,26 @@ register(
                 'the license.'),
     category=_('System'),
     category_slug='system',
+)
+
+register(
+    'INSTALL_UUID',
+    field_class=fields.CharField,
+    label=_('Unique identifier for an AWX/Tower installation'),
+    category=_('System'),
+    category_slug='system',
+    read_only=True,
+)
+
+register(
+    'CUSTOM_VENV_PATHS',
+    field_class=fields.StringListPathField,
+    label=_('Custom virtual environment paths'),
+    help_text=_('Paths where Tower will look for custom virtual environments '
+                '(in addition to /var/lib/awx/venv/). Enter one path per line.'),
+    category=_('System'),
+    category_slug='system',
+    default=[],
 )
 
 register(
@@ -288,6 +306,16 @@ register(
     category=_('Jobs'),
     category_slug='jobs',
     placeholder={'HTTP_PROXY': 'myproxy.local:8080'},
+)
+
+register(
+    'INSIGHTS_TRACKING_STATE',
+    field_class=fields.BooleanField,
+    default=False,
+    label=_('Gather data for Automation Insights'),
+    help_text=_('Enables Tower to gather data on automation and send it to Red Hat Insights.'),
+    category=_('System'),
+    category_slug='system',
 )
 
 register(

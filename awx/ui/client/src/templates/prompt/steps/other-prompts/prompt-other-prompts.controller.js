@@ -11,11 +11,9 @@ export default
             vm.strings = strings;
 
             let scope;
-            let launch;
 
-            vm.init = (_scope_, _launch_) => {
+            vm.init = (_scope_, controller, el) => {
                 scope = _scope_;
-                launch = _launch_;
 
                 scope.parseType = 'yaml';
 
@@ -104,9 +102,26 @@ export default
                     return ToJSON(scope.parseType, scope.extraVariables, true);
                 }
                 scope.validate = validate;
+
+                function focusFirstInput () {
+                  const inputs = el.find('input[type=text], select, textarea:visible, .CodeMirror textarea');
+                  if (inputs.length) {
+                    inputs.get(0).focus();
+                  }
+                }
+
+                angular.element(el).ready(() => {
+                    focusFirstInput();
+                });
+
+                scope.$on('promptTabChange', (event, args) => {
+                    if (args.step === 'other_prompts') {
+                        angular.element(el).ready(() => {
+                          focusFirstInput();
+                        });
+                    }
+                });
             };
-
-
 
             vm.toggleDiff = () => {
                 scope.promptData.prompts.diffMode.value = !scope.promptData.prompts.diffMode.value;

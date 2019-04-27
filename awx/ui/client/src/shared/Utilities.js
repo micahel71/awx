@@ -78,7 +78,7 @@ angular.module('Utilities', ['RestServices', 'Utilities'])
             $('#alert2-modal-msg').html(msg);
 
             alertClass = (cls) ? cls : 'alert-danger'; //default alert class is alert-danger
-            local_backdrop = (backdrop === undefined) ? "static" : backdrop;
+            local_backdrop = (backdrop === undefined || backdrop === null) ? "static" : backdrop;
 
             $('#alert2-modal-msg').attr({ "class": "alert " + alertClass });
             $('#alert-modal2').modal({
@@ -107,7 +107,7 @@ angular.module('Utilities', ['RestServices', 'Utilities'])
             $('#alertHeader').html(hdr);
             $('#alert-modal-msg').html(msg);
             alertClass = (cls) ? cls : 'alert-danger'; //default alert class is alert-danger
-            local_backdrop = (backdrop === undefined) ? "static" : backdrop;
+            local_backdrop = (backdrop === undefined || backdrop === null) ? "static" : backdrop;
 
             $('#alert-modal-msg').attr({ "class": "alert " + alertClass });
             $('#alert-modal').modal({
@@ -579,8 +579,8 @@ angular.module('Utilities', ['RestServices', 'Utilities'])
  * ]
  * ```
  */
-.factory('CreateSelect2', ['$filter',
-        function($filter) {
+.factory('CreateSelect2', ['$filter', '$q',
+        function($filter, $q) {
             return function(params) {
 
                 var element = params.element,
@@ -593,7 +593,8 @@ angular.module('Utilities', ['RestServices', 'Utilities'])
                     selectOptions = params.options,
                     model = params.model,
                     original_options,
-                    minimumResultsForSearch = params.minimumResultsForSearch ? params.minimumResultsForSearch : Infinity;
+                    minimumResultsForSearch = params.minimumResultsForSearch ? params.minimumResultsForSearch : Infinity,
+                    defer = $q.defer();
 
                     if (scope && selectOptions) {
                         original_options = _.get(scope, selectOptions);
@@ -703,8 +704,10 @@ angular.module('Utilities', ['RestServices', 'Utilities'])
 
                         $(element).trigger('change');
                     }
-
+                    defer.resolve("select2 loaded");
                 });
+
+                return defer.promise;
             };
         }
     ])

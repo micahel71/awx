@@ -81,6 +81,26 @@
     </div>
 </div>
 
+<!-- HOST LIMIT ERROR DETAIL -->
+<div class="JobResults-resultRow" ng-show="vm.hostLimitError">
+    <label class="JobResults-resultRowLabel">
+        {{ vm.hostLimitError.label }}
+        <a id="awp-hostLimitError"
+            href=""
+            aw-pop-over="{{ vm.hostLimitError.tooltip }}"
+            data-placement="top"
+            data-container="body"
+            class="help-link"
+            title="{{ vm.hostLimitError.label }}"
+            tabindex="-1">
+                <i class="fa fa-question-circle"></i>
+        </a>
+    </label>
+    <div class="JobResults-resultRowText">
+        {{ vm.hostLimitError.value }}
+    </div>
+</div>
+
 <!-- START TIME DETAIL -->
 <div class="JobResults-resultRow" ng-if="vm.started">
     <label class="JobResults-resultRowLabel">{{ vm.started.label }}</label>
@@ -330,7 +350,7 @@
 <at-code-mirror
     class="JobResults-resultRow"
     ng-if="vm.extraVars"
-    variables="{{ vm.extraVars.value }}"
+    variables="vm.extraVars.value"
     tooltip="{{ vm.extraVars.tooltip }}"
     label="{{ vm.extraVars.label }}"
     name="{{ vm.extraVars.name }}"
@@ -341,7 +361,7 @@
 <at-code-mirror
     class="JobResults-resultRow"
     ng-if="vm.artifacts"
-    variables="{{ vm.artifacts.value }}"
+    variables="vm.artifacts.value"
     tooltip="{{ vm.artifacts.tooltip }}"
     label="{{ vm.artifacts.label }}"
     name="{{ vm.artifacts.name }}"

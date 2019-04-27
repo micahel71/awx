@@ -1,5 +1,4 @@
 ---
-
 # The following variables will be set by the runner of this playbook:
 # src: /tmp/some/path/private_data_dir/
 
@@ -10,7 +9,7 @@
   tasks:
 
     - name: Determine if daemon process is alive.
-      shell: "awx-expect is-alive {{src}}"
+      shell: "ansible-runner is-alive {{src}}"
       register: is_alive
       ignore_errors: true
 
@@ -19,20 +18,16 @@
         src: "{{src}}/artifacts/"
         dest: "{{src}}/artifacts/"
         mode: pull
+        delete: yes
         recursive: yes
+
+    - name: Copy daemon log from the isolated host
+      synchronize:
+        src: "{{src}}/daemon.log"
+        dest: "{{src}}/daemon.log"
+        mode: pull
 
     - name: Fail if previous check determined that process is not alive.
       fail:
         msg: "isolated task is still running"
       when: "is_alive.rc == 0"
-
-    - stat: path="{{src}}/facts/"
-      register: fact_cache
-
-    - name: Copy gathered facts from the isolated host.
-      synchronize:
-        src: "{{src}}/facts/"
-        dest: "{{src}}/facts/"
-        delete: yes  # delete fact cache records that go missing via clear_facts
-        mode: pull
-      when: fact_cache.stat.exists

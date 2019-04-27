@@ -12,6 +12,7 @@ import sys
 import time
 import traceback
 import shutil
+from distutils.version import LooseVersion as Version
 
 # Django
 from django.conf import settings
@@ -37,8 +38,10 @@ from awx.main.utils import (
     build_proot_temp_dir,
     get_licenser
 )
+from awx.main.utils.common import _get_ansible_version
 from awx.main.signals import disable_activity_stream
 from awx.main.constants import STANDARD_INVENTORY_UPDATE_ENV
+from awx.main.utils.pglock import advisory_lock
 
 logger = logging.getLogger('awx.main.commands.inventory_import')
 
@@ -73,12 +76,13 @@ class AnsibleInventoryLoader(object):
         /usr/bin/ansible/ansible-inventory -i hosts --list
     '''
 
-    def __init__(self, source, is_custom=False, venv_path=None):
+    def __init__(self, source, is_custom=False, venv_path=None, verbosity=0):
         self.source = source
         self.source_dir = functioning_dir(self.source)
         self.is_custom = is_custom
         self.tmp_private_dir = None
         self.method = 'ansible-inventory'
+        self.verbosity = verbosity
         if venv_path:
             self.venv_path = venv_path
         else:
@@ -124,7 +128,22 @@ class AnsibleInventoryLoader(object):
 
     def get_base_args(self):
         # get ansible-inventory absolute path for running in bubblewrap/proot, in Popen
-        bargs= [self.get_path_to_ansible_inventory(), '-i', self.source]
+        ansible_inventory_path = self.get_path_to_ansible_inventory()
+        # NOTE: why do we add "python" to the start of these args?
+        # the script that runs ansible-inventory specifies a python interpreter
+        # that makes no sense in light of the fact that we put all the dependencies
+        # inside of /venv/ansible, so we override the specified interpreter
+        # https://github.com/ansible/ansible/issues/50714
+        bargs = ['python', ansible_inventory_path, '-i', self.source]
+        ansible_version = _get_ansible_version(ansible_inventory_path[:-len('-inventory')])
+        if ansible_version != 'unknown':
+            this_version = Version(ansible_version)
+            if this_version >= Version('2.5'):
+                bargs.extend(['--playbook-dir', self.source_dir])
+            if this_version >= Version('2.8'):
+                if self.verbosity:
+                    # INFO: -vvv, DEBUG: -vvvvv, for inventory, any more than 3 makes little difference
+                    bargs.append('-{}'.format('v' * min(5, self.verbosity * 2 + 1)))
         logger.debug('Using base command: {}'.format(' '.join(bargs)))
         return bargs
 
@@ -302,11 +321,6 @@ class Command(BaseCommand):
             raise NotImplementedError('Value of enabled {} not understood.'.format(enabled))
 
     def get_source_absolute_path(self, source):
-        # Sanity check: We sanitize these module names for our API but Ansible proper doesn't follow
-        # good naming conventions
-        source = source.replace('rhv.py', 'ovirt4.py')
-        source = source.replace('satellite6.py', 'foreman.py')
-        source = source.replace('vmware.py', 'vmware_inventory.py')
         if not os.path.exists(source):
             raise IOError('Source does not exist: %s' % source)
         source = os.path.join(os.getcwd(), os.path.dirname(source),
@@ -864,27 +878,40 @@ class Command(BaseCommand):
         Load inventory from in-memory groups to the database, overwriting or
         merging as appropriate.
         '''
-        # FIXME: Attribute changes to superuser?
-        # Perform __in queries in batches (mainly for unit tests using SQLite).
-        self._batch_size = 500
-        self._build_db_instance_id_map()
-        self._build_mem_instance_id_map()
-        if self.overwrite:
-            self._delete_hosts()
-            self._delete_groups()
-            self._delete_group_children_and_hosts()
-        self._update_inventory()
-        self._create_update_groups()
-        self._create_update_hosts()
-        self._create_update_group_children()
-        self._create_update_group_hosts()
+        with advisory_lock('inventory_{}_update'.format(self.inventory.id)):
+            # FIXME: Attribute changes to superuser?
+            # Perform __in queries in batches (mainly for unit tests using SQLite).
+            self._batch_size = 500
+            self._build_db_instance_id_map()
+            self._build_mem_instance_id_map()
+            if self.overwrite:
+                self._delete_hosts()
+                self._delete_groups()
+                self._delete_group_children_and_hosts()
+            self._update_inventory()
+            self._create_update_groups()
+            self._create_update_hosts()
+            self._create_update_group_children()
+            self._create_update_group_hosts()
+
+    def remote_tower_license_compare(self, local_license_type):
+        # this requires https://github.com/ansible/ansible/pull/52747
+        source_vars = self.all_group.variables
+        remote_license_type = source_vars.get('tower_metadata', {}).get('license_type', None)
+        if remote_license_type is None:
+            raise CommandError('Unexpected Error: Tower inventory plugin missing needed metadata!')
+        if local_license_type != remote_license_type:
+            raise CommandError('Tower server licenses must match: source: {} local: {}'.format(
+                remote_license_type, local_license_type
+            ))
 
     def check_license(self):
         license_info = get_licenser().validate()
+        local_license_type = license_info.get('license_type', 'UNLICENSED')
         if license_info.get('license_key', 'UNLICENSED') == 'UNLICENSED':
             logger.error(LICENSE_NON_EXISTANT_MESSAGE)
             raise CommandError('No license found!')
-        elif license_info.get('license_type', 'UNLICENSED') == 'open':
+        elif local_license_type == 'open':
             return
         available_instances = license_info.get('available_instances', 0)
         free_instances = license_info.get('free_instances', 0)
@@ -893,6 +920,13 @@ class Command(BaseCommand):
         if time_remaining <= 0 and not license_info.get('demo', False):
             logger.error(LICENSE_EXPIRED_MESSAGE)
             raise CommandError("License has expired!")
+        # special check for tower-type inventory sources
+        # but only if running the plugin
+        TOWER_SOURCE_FILES = ['tower.yml', 'tower.yaml']
+        if self.inventory_source.source == 'tower' and any(f in self.source for f in TOWER_SOURCE_FILES):
+            # only if this is the 2nd call to license check, we cannot compare before running plugin
+            if hasattr(self, 'all_group'):
+                self.remote_tower_license_compare(local_license_type)
         if free_instances < 0:
             d = {
                 'new_count': new_count,
@@ -904,9 +938,26 @@ class Command(BaseCommand):
                 logger.error(LICENSE_MESSAGE % d)
             raise CommandError('License count exceeded!')
 
+    def check_org_host_limit(self):
+        license_info = get_licenser().validate()
+        if license_info.get('license_type', 'UNLICENSED') == 'open':
+            return
+
+        org = self.inventory.organization
+        if org is None or org.max_hosts == 0:
+            return
+
+        active_count = Host.objects.org_active_count(org.id)
+        if active_count > org.max_hosts:
+            raise CommandError('Host limit for organization exceeded!')
+
     def mark_license_failure(self, save=True):
         self.inventory_update.license_error = True
         self.inventory_update.save(update_fields=['license_error'])
+
+    def mark_org_limits_failure(self, save=True):
+        self.inventory_update.org_host_limit_error = True
+        self.inventory_update.save(update_fields=['org_host_limit_error'])
 
     def handle(self, *args, **options):
         self.verbosity = int(options.get('verbosity', 1))
@@ -961,6 +1012,13 @@ class Command(BaseCommand):
             self.mark_license_failure(save=True)
             raise e
 
+        try:
+            # Check the per-org host limits
+            self.check_org_host_limit()
+        except CommandError as e:
+            self.mark_org_limits_failure(save=True)
+            raise e
+
         status, tb, exc = 'error', '', None
         try:
             if settings.SQL_DEBUG:
@@ -976,7 +1034,8 @@ class Command(BaseCommand):
 
             source = self.get_source_absolute_path(self.source)
 
-            data = AnsibleInventoryLoader(source=source, is_custom=self.is_custom, venv_path=venv_path).load()
+            data = AnsibleInventoryLoader(source=source, is_custom=self.is_custom,
+                                          venv_path=venv_path, verbosity=self.verbosity).load()
 
             logger.debug('Finished loading from source: %s', source)
             logger.info('Processing JSON output...')
@@ -1029,12 +1088,20 @@ class Command(BaseCommand):
                                 logger.warning('update computed fields took %d queries',
                                                len(connection.queries) - queries_before2)
                         # Check if the license is valid. 
-                        # If the license is not valid, a CommandError will be thrown, 
+                        # If the license is not valid, a CommandError will be thrown,
                         # and inventory update will be marked as invalid.
                         # with transaction.atomic() will roll back the changes.
+                        license_fail = True
                         self.check_license()
+
+                        # Check the per-org host limits
+                        license_fail = False
+                        self.check_org_host_limit()
                 except CommandError as e:
-                    self.mark_license_failure()
+                    if license_fail:
+                        self.mark_license_failure()
+                    else:
+                        self.mark_org_limits_failure()
                     raise e
 
                 if settings.SQL_DEBUG:
@@ -1062,9 +1129,8 @@ class Command(BaseCommand):
             else:
                 tb = traceback.format_exc()
                 exc = e
-            transaction.rollback()
 
-        if self.invoked_from_dispatcher is False:
+        if not self.invoked_from_dispatcher:
             with ignore_inventory_computed_fields():
                 self.inventory_update = InventoryUpdate.objects.get(pk=self.inventory_update.pk)
                 self.inventory_update.result_traceback = tb
@@ -1073,7 +1139,10 @@ class Command(BaseCommand):
                 self.inventory_source.status = status
                 self.inventory_source.save(update_fields=['status'])
 
-        if exc and isinstance(exc, CommandError):
-            sys.exit(1)
-        elif exc:
+            if exc:
+                logger.error(str(exc))
+
+        if exc:
+            if isinstance(exc, CommandError):
+                sys.exit(1)
             raise exc

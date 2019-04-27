@@ -4,6 +4,7 @@ import pytest
 from unittest import mock
 from contextlib import contextmanager
 
+from awx.main.models import Credential
 from awx.main.tests.factories import (
     create_organization,
     create_job_template,
@@ -13,6 +14,8 @@ from awx.main.tests.factories import (
     create_survey_spec,
     create_workflow_job_template,
 )
+
+from django.core.cache import cache
 
 
 def pytest_addoption(parser):
@@ -130,3 +133,18 @@ def mock_cache():
 
     return MockCache()
 
+
+def pytest_runtest_teardown(item, nextitem):
+    # clear Django cache at the end of every test ran
+    # NOTE: this should not be memcache, see test_cache in test_env.py
+    # this is a local test cache, so we want every test to start with empty cache
+    cache.clear()
+
+
+@pytest.fixture(scope='session', autouse=True)
+def mock_external_credential_input_sources():
+    # Credential objects query their related input sources on initialization.
+    # We mock that behavior out of credentials by default unless we need to
+    # test it explicitly.
+    with mock.patch.object(Credential, 'dynamic_input_fields', new=[]) as _fixture:
+        yield _fixture

@@ -38,6 +38,13 @@ function ApplicationsStrings (BaseString) {
     ns.inputs = {
         ORGANIZATION_PLACEHOLDER: t.s('SELECT AN ORGANIZATION')
     };
+
+    ns.sort = {
+        NAME_ASCENDING: t.s('Name (Ascending)'),
+        NAME_DESCENDING: t.s('Name (Descending)'),
+        USERNAME_ASCENDING: t.s('Username (Ascending)'),
+        USERNAME_DESCENDING: t.s('Username (Descending)')
+    };
 }
 
 ApplicationsStrings.$inject = ['BaseStringService'];

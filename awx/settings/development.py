@@ -88,6 +88,7 @@ AWX_ISOLATED_LAUNCH_TIMEOUT = 30
 # Disable Pendo on the UI for development/test.
 # Note: This setting may be overridden by database settings.
 PENDO_TRACKING_STATE = "off"
+INSIGHTS_TRACKING_STATE = False
 
 # Use Django-Jenkins if installed. Only run tests for awx.main app.
 try:
@@ -115,6 +116,7 @@ INSTALLED_APPS += ('rest_framework_swagger',)
 
 # Configure a default UUID for development only.
 SYSTEM_UUID = '00000000-0000-0000-0000-000000000000'
+INSTALL_UUID = '00000000-0000-0000-0000-000000000000'
 
 # Store a snapshot of default settings at this point before loading any
 # customizable config files.
@@ -141,6 +143,15 @@ try:
 except ImportError:
     traceback.print_exc()
     sys.exit(1)
+
+
+CELERYBEAT_SCHEDULE.update({  # noqa
+    'isolated_heartbeat': {
+        'task': 'awx.main.tasks.awx_isolated_heartbeat',
+        'schedule': timedelta(seconds=AWX_ISOLATED_PERIODIC_CHECK),  # noqa
+        'options': {'expires': AWX_ISOLATED_PERIODIC_CHECK * 2},  # noqa
+    }
+})
 
 CLUSTER_HOST_ID = socket.gethostname()
 

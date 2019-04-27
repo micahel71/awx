@@ -20,7 +20,7 @@ function BaseInputController (strings) {
             scope.state._displayPromptOnLaunch = true;
         }
 
-        if (scope.state._value) {
+        if (typeof scope.state._value !== 'undefined') {
             scope.state._edit = true;
             scope.state._preEditValue = scope.state._value;
 
@@ -37,6 +37,8 @@ function BaseInputController (strings) {
                 scope.state._isBeingReplaced = false;
                 scope.state._activeModel = '_displayValue';
             }
+        } else if (typeof scope.state.default !== 'undefined') {
+            scope.state._value = scope.state.default;
         }
 
         form.register(type, scope);
@@ -48,6 +50,10 @@ function BaseInputController (strings) {
         vm.validate = () => {
             let isValid = true;
             let message = '';
+
+            if (scope.state.asTag) {
+                return (isValid, message);
+            }
 
             if (scope.state._value || scope.state._displayValue) {
                 scope.state._touched = true;

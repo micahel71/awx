@@ -10,8 +10,6 @@ SOSREPORT_TOWER_COMMANDS = [
     "awx-manage list_instances", # tower cluster configuration
     "awx-manage run_dispatcher --status", # tower dispatch worker status
     "supervisorctl status",   # tower process status
-    "rabbitmqctl status",
-    "rabbitmqctl cluster_status",
     "/var/lib/awx/venv/awx/bin/pip freeze",        # pip package list
     "/var/lib/awx/venv/awx/bin/pip freeze -l",     # pip package list without globally-installed packages
     "/var/lib/awx/venv/ansible/bin/pip freeze",    # pip package list
@@ -30,7 +28,6 @@ SOSREPORT_TOWER_DIRS = [
     "/etc/nginx/",
     "/var/log/tower",
     "/var/log/nginx",
-    "/var/log/rabbitmq",
     "/var/log/supervisor",
     "/var/log/syslog",
     "/var/log/udev",
@@ -46,7 +43,8 @@ SOSREPORT_FORBIDDEN_PATHS = [
     "/etc/tower/tower.key",
     "/etc/tower/awx.key",
     "/etc/tower/tower.cert",
-    "/etc/tower/awx.cert"
+    "/etc/tower/awx.cert",
+    "/var/log/tower/profile"
 ]
 
 if LooseVersion(sos.__version__) >= LooseVersion('3.0'):
