@@ -7,7 +7,7 @@ localhost ansible_connection=local ansible_python_interpreter="/usr/bin/env pyth
 # be selected based on: latest, 1, 1.0, 1.0.0, 1.0.0.123
 # by default the base will be used to search for ansible/awx_web and ansible/awx_task
 dockerhub_base=ansible
-dockerhub_version=latest
+#dockerhub_version=latest
 
 # Openshift Install
 # Will need to set -e openshift_password=developer -e docker_registry_password=$(oc whoami -t)
@@ -53,14 +53,9 @@ dockerhub_version=latest
 awx_task_hostname=awx
 awx_web_hostname=awxweb
 postgres_data_dir=/var/lib/pgdocker
-host_port=81
+host_port=8100
 #ssl_certificate=
-
-# Docker Compose Install
-# use_docker_compose=false
-# The docker_compose.yml file will be created in this directory
-# The name of the directory (here "awx") will be the prefix of the docker containers
-#docker_compose_dir=/var/lib/awx
+docker_compose_dir=/tmp/awxcompose
 
 # Required for Openshift when building the image on your own
 # Optional for Openshift if using Dockerhub or another prebuilt registry
