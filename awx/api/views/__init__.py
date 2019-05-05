@@ -3624,7 +3624,6 @@ class JobStart(GenericAPIView):
         )
         if obj.can_start:
             data['passwords_needed_to_start'] = obj.passwords_needed_to_start
-            data['ask_variables_on_launch'] = obj.ask_variables_on_launch
         return Response(data)
 
     def post(self, request, *args, **kwargs):
@@ -3863,6 +3862,12 @@ class JobEventChildrenList(SubListAPIView):
     relationship = 'children'
     view_name = _('Job Event Children List')
     search_fields = ('stdout',)
+
+    def get_queryset(self):
+        parent_event = self.get_parent_object()
+        self.check_parent_access(parent_event)
+        qs = self.request.user.get_queryset(self.model).filter(parent_uuid=parent_event.uuid)
+        return qs
 
 
 class JobEventHostsList(HostRelatedSearchMixin, SubListAPIView):
@@ -4170,12 +4175,14 @@ class UnifiedJobTemplateList(ListAPIView):
 
     model = models.UnifiedJobTemplate
     serializer_class = serializers.UnifiedJobTemplateSerializer
+    search_fields = ('description', 'name', 'jobtemplate__playbook',)
 
 
 class UnifiedJobList(ListAPIView):
 
     model = models.UnifiedJob
     serializer_class = serializers.UnifiedJobListSerializer
+    search_fields = ('description', 'name', 'job__playbook',)
 
 
 def redact_ansi(line):

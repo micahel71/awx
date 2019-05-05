@@ -3229,41 +3229,12 @@ class JobTemplateWithSpecSerializer(JobTemplateSerializer):
 class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
 
     passwords_needed_to_start = serializers.ReadOnlyField()
-    ask_diff_mode_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_variables_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_limit_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_skip_tags_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_tags_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_job_type_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_verbosity_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_inventory_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_credential_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
     artifacts = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
-        fields = ('*', 'job_template', 'passwords_needed_to_start', 'ask_diff_mode_on_launch',
-                  'ask_variables_on_launch', 'ask_limit_on_launch', 'ask_tags_on_launch', 'ask_skip_tags_on_launch',
-                  'ask_job_type_on_launch', 'ask_verbosity_on_launch', 'ask_inventory_on_launch',
-                  'ask_credential_on_launch', 'allow_simultaneous', 'artifacts', 'scm_revision',
+        fields = ('*', 'job_template', 'passwords_needed_to_start',
+                  'allow_simultaneous', 'artifacts', 'scm_revision',
                   'instance_group', 'diff_mode', 'job_slice_number', 'job_slice_count')
 
     def get_related(self, obj):
@@ -4124,8 +4095,7 @@ class JobEventSerializer(BaseSerializer):
         ))
         if obj.parent_id:
             res['parent'] = self.reverse('api:job_event_detail', kwargs={'pk': obj.parent_id})
-        if obj.children.exists():
-            res['children'] = self.reverse('api:job_event_children_list', kwargs={'pk': obj.pk})
+        res['children'] = self.reverse('api:job_event_children_list', kwargs={'pk': obj.pk})
         if obj.host_id:
             res['host'] = self.reverse('api:host_detail', kwargs={'pk': obj.host_id})
         if obj.hosts.exists():
