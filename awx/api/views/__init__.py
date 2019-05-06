@@ -31,7 +31,7 @@ from django.utils.translation import ugettext_lazy as _
 
 
 # Django REST Framework
-from rest_framework.exceptions import PermissionDenied, ParseError
+from rest_framework.exceptions import APIException, PermissionDenied, ParseError, NotFound
 from rest_framework.parsers import FormParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.renderers import JSONRenderer, StaticHTMLRenderer
@@ -60,12 +60,12 @@ import pytz
 from wsgiref.util import FileWrapper
 
 # AWX
-from awx.main.tasks import send_notifications
+from awx.main.tasks import send_notifications, update_inventory_computed_fields
 from awx.main.access import get_user_queryset
 from awx.api.filters import V1CredentialFilterBackend
 from awx.api.generics import (
     APIView, BaseUsersList, CopyAPIView, DeleteLastUnattachLabelMixin,
-    GenericAPIView, ListAPIView, ListCreateAPIView, ParentMixin,
+    GenericAPIView, ListAPIView, ListCreateAPIView,
     ResourceAccessList, RetrieveAPIView, RetrieveDestroyAPIView,
     RetrieveUpdateAPIView, RetrieveUpdateDestroyAPIView, SimpleListAPIView,
     SubDetailAPIView, SubListAPIView, SubListAttachDetachAPIView,
@@ -73,7 +73,7 @@ from awx.api.generics import (
     SubListDestroyAPIView, get_view_name
 )
 from awx.api.versioning import reverse, get_request_version
-from awx.conf.license import feature_enabled, feature_exists, LicenseForbids, get_license
+from awx.conf.license import get_license
 from awx.main import models
 from awx.main.utils import (
     camelcase_to_underscore,
@@ -83,6 +83,7 @@ from awx.main.utils import (
     getattrd,
     get_pk_from_dict,
     schedule_task_manager,
+    ignore_inventory_computed_fields
 )
 from awx.main.utils.encryption import encrypt_value
 from awx.main.utils.filters import SmartFilter
@@ -99,10 +100,9 @@ from awx.api.metadata import RoleMetadata, JobTypeMetadata
 from awx.main.constants import ACTIVE_STATES
 from awx.main.scheduler.dag_workflow import WorkflowDAG
 from awx.api.views.mixin import (
-    ActivityStreamEnforcementMixin, ControlledByScmMixin,
-    InstanceGroupMembershipMixin, OrganizationCountsMixin,
-    RelatedJobsPreventDeleteMixin, SystemTrackingEnforcementMixin,
-    UnifiedJobDeletionMixin, WorkflowsEnforcementMixin,
+    ControlledByScmMixin, InstanceGroupMembershipMixin,
+    OrganizationCountsMixin, RelatedJobsPreventDeleteMixin,
+    UnifiedJobDeletionMixin,
 )
 from awx.api.views.organization import ( # noqa
     OrganizationList,
@@ -168,6 +168,8 @@ def api_exception_handler(exc, context):
 
 class DashboardView(APIView):
 
+    deprecated = True
+
     view_name = _("Dashboard")
     swagger_topic = 'Dashboard'
 
@@ -178,7 +180,8 @@ class DashboardView(APIView):
         user_inventory = get_user_queryset(request.user, models.Inventory)
         inventory_with_failed_hosts = user_inventory.filter(hosts_with_active_failures__gt=0)
         user_inventory_external = user_inventory.filter(has_inventory_sources=True)
-        failed_inventory = user_inventory.aggregate(Sum('inventory_sources_with_failures'))['inventory_sources_with_failures__sum']
+        # if there are *zero* inventories, this aggregrate query will be None, fall back to 0
+        failed_inventory = user_inventory.aggregate(Sum('inventory_sources_with_failures'))['inventory_sources_with_failures__sum'] or 0
         data['inventories'] = {'url': reverse('api:inventory_list', request=request),
                                'total': user_inventory.count(),
                                'total_with_inventory_source': user_inventory_external.count(),
@@ -276,7 +279,7 @@ class DashboardJobsGraphView(APIView):
         period = request.query_params.get('period', 'month')
         job_type = request.query_params.get('job_type', 'all')
 
-        user_unified_jobs = get_user_queryset(request.user, models.UnifiedJob)
+        user_unified_jobs = get_user_queryset(request.user, models.UnifiedJob).exclude(launch_type='sync')
 
         success_query = user_unified_jobs.filter(status='successful')
         failed_query = user_unified_jobs.filter(status='failed')
@@ -528,12 +531,6 @@ class AuthView(APIView):
         # Return auth backends in consistent order: Google, GitHub, SAML.
         auth_backends.sort(key=lambda x: 'g' if x[0] == 'google-oauth2' else x[0])
         for name, backend in auth_backends:
-            if (not feature_exists('enterprise_auth') and
-                not feature_enabled('ldap')) or \
-                (not feature_enabled('enterprise_auth') and
-                 name in ['saml', 'radius']):
-                continue
-
             login_url = reverse('social:begin', args=(name,))
             complete_url = request.build_absolute_uri(reverse('social:complete', args=(name,)))
             backend_data = {
@@ -647,7 +644,7 @@ class TeamProjectsList(SubListAPIView):
         return self.model.accessible_objects(self.request.user, 'read_role').filter(pk__in=[t.content_object.pk for t in proj_roles])
 
 
-class TeamActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class TeamActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -743,7 +740,7 @@ class ProjectScmInventorySources(SubListAPIView):
     parent_key = 'source_project'
 
 
-class ProjectActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class ProjectActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -927,21 +924,6 @@ class UserList(ListCreateAPIView):
     serializer_class = serializers.UserSerializer
     permission_classes = (UserPermission,)
 
-    def post(self, request, *args, **kwargs):
-        ret = super(UserList, self).post( request, *args, **kwargs)
-        try:
-            if request.data.get('is_system_auditor', False):
-                # This is a faux-field that just maps to checking the system
-                # auditor role member list.. unfortunately this means we can't
-                # set it on creation, and thus needs to be set here.
-                user = models.User.objects.get(id=ret.data['id'])
-                user.is_system_auditor = request.data['is_system_auditor']
-                ret.data['is_system_auditor'] = request.data['is_system_auditor']
-        except AttributeError as exc:
-            print(exc)
-            pass
-        return ret
-
 
 class UserMeList(ListAPIView):
 
@@ -987,7 +969,7 @@ class ApplicationOAuth2TokenList(SubListCreateAPIView):
     swagger_topic = 'Authentication'
 
 
-class OAuth2ApplicationActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class OAuth2ApplicationActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -1069,7 +1051,7 @@ class OAuth2TokenDetail(RetrieveUpdateDestroyAPIView):
     swagger_topic = 'Authentication'
 
 
-class OAuth2TokenActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class OAuth2TokenActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -1183,7 +1165,7 @@ class UserAdminOfOrganizationsList(OrganizationCountsMixin, SubListAPIView):
         return my_qs & user_qs
 
 
-class UserActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class UserActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -1270,7 +1252,7 @@ class CredentialTypeCredentialList(SubListCreateAPIView):
     serializer_class = serializers.CredentialSerializer
 
 
-class CredentialTypeActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class CredentialTypeActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -1384,7 +1366,7 @@ class CredentialDetail(RetrieveUpdateDestroyAPIView):
     filter_backends = RetrieveUpdateDestroyAPIView.filter_backends + [V1CredentialFilterBackend]
 
 
-class CredentialActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class CredentialActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -1416,6 +1398,88 @@ class CredentialCopy(CopyAPIView):
 
     model = models.Credential
     copy_return_serializer_class = serializers.CredentialSerializer
+
+
+class CredentialExternalTest(SubDetailAPIView):
+    """
+    Test updates to the input values and metadata of an external credential
+    before saving them.
+    """
+
+    view_name = _('External Credential Test')
+
+    model = models.Credential
+    serializer_class = serializers.EmptySerializer
+
+    def post(self, request, *args, **kwargs):
+        obj = self.get_object()
+        backend_kwargs = {}
+        for field_name, value in obj.inputs.items():
+            backend_kwargs[field_name] = obj.get_input(field_name)
+        for field_name, value in request.data.get('inputs', {}).items():
+            if value != '$encrypted$':
+                backend_kwargs[field_name] = value
+        backend_kwargs.update(request.data.get('metadata', {}))
+        try:
+            obj.credential_type.plugin.backend(**backend_kwargs)
+            return Response({}, status=status.HTTP_202_ACCEPTED)
+        except requests.exceptions.HTTPError as exc:
+            message = 'HTTP {}\n{}'.format(exc.response.status_code, exc.response.text)
+            return Response({'inputs': message}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({'inputs': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CredentialInputSourceDetail(RetrieveUpdateDestroyAPIView):
+
+    view_name = _("Credential Input Source Detail")
+
+    model = models.CredentialInputSource
+    serializer_class = serializers.CredentialInputSourceSerializer
+
+
+class CredentialInputSourceList(ListCreateAPIView):
+
+    view_name = _("Credential Input Sources")
+
+    model = models.CredentialInputSource
+    serializer_class = serializers.CredentialInputSourceSerializer
+
+
+class CredentialInputSourceSubList(SubListCreateAPIView):
+
+    view_name = _("Credential Input Sources")
+
+    model = models.CredentialInputSource
+    serializer_class = serializers.CredentialInputSourceSerializer
+    parent_model = models.Credential
+    relationship = 'input_sources'
+    parent_key = 'target_credential'
+
+
+class CredentialTypeExternalTest(SubDetailAPIView):
+    """
+    Test a complete set of input values for an external credential before
+    saving it.
+    """
+
+    view_name = _('External Credential Type Test')
+
+    model = models.CredentialType
+    serializer_class = serializers.EmptySerializer
+
+    def post(self, request, *args, **kwargs):
+        obj = self.get_object()
+        backend_kwargs = request.data.get('inputs', {})
+        backend_kwargs.update(request.data.get('metadata', {}))
+        try:
+            obj.plugin.backend(**backend_kwargs)
+            return Response({}, status=status.HTTP_202_ACCEPTED)
+        except requests.exceptions.HTTPError as exc:
+            message = 'HTTP {}\n{}'.format(exc.response.status_code, exc.response.text)
+            return Response({'inputs': message}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({'inputs': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class HostRelatedSearchMixin(object):
@@ -1534,7 +1598,7 @@ class HostSmartInventoriesList(SubListAPIView):
     relationship = 'smart_inventories'
 
 
-class HostActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class HostActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -1549,51 +1613,16 @@ class HostActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
         return qs.filter(Q(host=parent) | Q(inventory=parent.inventory))
 
 
-class HostFactVersionsList(SystemTrackingEnforcementMixin, ParentMixin, ListAPIView):
-
-    model = models.Fact
-    serializer_class = serializers.FactVersionSerializer
-    parent_model = models.Host
-    search_fields = ('facts',)
-    deprecated = True
-
-    def get_queryset(self):
-        from_spec = self.request.query_params.get('from', None)
-        to_spec = self.request.query_params.get('to', None)
-        module_spec = self.request.query_params.get('module', None)
-
-        if from_spec:
-            from_spec = dateutil.parser.parse(from_spec)
-        if to_spec:
-            to_spec = dateutil.parser.parse(to_spec)
-
-        host_obj = self.get_parent_object()
-
-        return models.Fact.get_timeline(host_obj.id, module=module_spec, ts_from=from_spec, ts_to=to_spec)
-
-    def list(self, *args, **kwargs):
-        queryset = self.get_queryset() or []
-        return Response(dict(results=self.serializer_class(queryset, many=True).data))
+class BadGateway(APIException):
+    status_code = status.HTTP_502_BAD_GATEWAY
+    default_detail = ''
+    default_code = 'bad_gateway'
 
 
-class HostFactCompareView(SystemTrackingEnforcementMixin, SubDetailAPIView):
-
-    model = models.Fact
-    parent_model = models.Host
-    serializer_class = serializers.FactSerializer
-    deprecated = True
-
-    def retrieve(self, request, *args, **kwargs):
-        datetime_spec = request.query_params.get('datetime', None)
-        module_spec = request.query_params.get('module', "ansible")
-        datetime_actual = dateutil.parser.parse(datetime_spec) if datetime_spec is not None else now()
-
-        host_obj = self.get_parent_object()
-
-        fact_entry = models.Fact.get_host_fact(host_obj.id, module_spec, datetime_actual)
-        if not fact_entry:
-            return Response({'detail': _('Fact not found.')}, status=status.HTTP_404_NOT_FOUND)
-        return Response(self.serializer_class(instance=fact_entry).data)
+class GatewayTimeout(APIException):
+    status_code = status.HTTP_504_GATEWAY_TIMEOUT
+    default_detail = ''
+    default_code = 'gateway_timeout'
 
 
 class HostInsights(GenericAPIView):
@@ -1601,12 +1630,41 @@ class HostInsights(GenericAPIView):
     model = models.Host
     serializer_class = serializers.EmptySerializer
 
-    def _extract_insights_creds(self, credential):
-        return (credential.get_input('username', default=''), credential.get_input('password', default=''))
+    def _call_insights_api(self, url, session, headers):
+        try:
+            res = session.get(url, headers=headers, timeout=120)
+        except requests.exceptions.SSLError:
+            raise BadGateway(_('SSLError while trying to connect to {}').format(url))
+        except requests.exceptions.Timeout:
+            raise GatewayTimeout(_('Request to {} timed out.').format(url))
+        except requests.exceptions.RequestException as e:
+            raise BadGateway(_('Unknown exception {} while trying to GET {}').format(e, url))
 
-    def _get_insights(self, url, username, password):
+        if res.status_code == 401:
+            raise BadGateway(
+                _('Unauthorized access. Please check your Insights Credential username and password.'))
+        elif res.status_code != 200:
+            raise BadGateway(
+                _(
+                    'Failed to access the Insights API at URL {}.'
+                    ' Server responded with {} status code and message {}'
+                ).format(url, res.status_code, res.content)
+            )
+
+        try:
+            return res.json()
+        except ValueError:
+            raise BadGateway(
+                _('Expected JSON response from Insights at URL {}'
+                  ' but instead got {}').format(url, res.content))
+
+    def _get_session(self, username, password):
         session = requests.Session()
         session.auth = requests.auth.HTTPBasicAuth(username, password)
+
+        return session
+
+    def _get_headers(self):
         license = get_license(show_key=False).get('license_type', 'UNLICENSED')
         headers = {
             'Content-Type': 'application/json',
@@ -1616,47 +1674,84 @@ class HostInsights(GenericAPIView):
                 license
             )
         }
-        return session.get(url, headers=headers, timeout=120)
 
-    def get_insights(self, url, username, password):
+        return headers
+
+    def _get_platform_info(self, host, session, headers):
+        url = '{}/api/inventory/v1/hosts?insights_id={}'.format(
+            settings.INSIGHTS_URL_BASE, host.insights_system_id)
+        res = self._call_insights_api(url, session, headers)
         try:
-            res = self._get_insights(url, username, password)
-        except requests.exceptions.SSLError:
-            return (dict(error=_('SSLError while trying to connect to {}').format(url)), status.HTTP_502_BAD_GATEWAY)
-        except requests.exceptions.Timeout:
-            return (dict(error=_('Request to {} timed out.').format(url)), status.HTTP_504_GATEWAY_TIMEOUT)
-        except requests.exceptions.RequestException as e:
-            return (dict(error=_('Unknown exception {} while trying to GET {}').format(e, url)), status.HTTP_502_BAD_GATEWAY)
+            res['results'][0]['id']
+        except (IndexError, KeyError):
+            raise NotFound(
+                _('Could not translate Insights system ID {}'
+                  ' into an Insights platform ID.').format(host.insights_system_id))
 
-        if res.status_code == 401:
-            return (dict(error=_('Unauthorized access. Please check your Insights Credential username and password.')), status.HTTP_502_BAD_GATEWAY)
-        elif res.status_code != 200:
-            return (dict(error=_(
-                'Failed to gather reports and maintenance plans from Insights API at URL {}. Server responded with {} status code and message {}'
-            ).format(url, res.status_code, res.content)), status.HTTP_502_BAD_GATEWAY)
+        return res['results'][0]
 
-        try:
-            filtered_insights_content = filter_insights_api_response(res.json())
-            return (dict(insights_content=filtered_insights_content), status.HTTP_200_OK)
-        except ValueError:
-            return (dict(error=_('Expected JSON response from Insights but instead got {}').format(res.content)), status.HTTP_502_BAD_GATEWAY)
+    def _get_reports(self, platform_id, session, headers):
+        url = '{}/api/insights/v1/system/{}/reports/'.format(
+            settings.INSIGHTS_URL_BASE, platform_id)
+
+        return self._call_insights_api(url, session, headers)
+
+    def _get_remediations(self, platform_id, session, headers):
+        url = '{}/api/remediations/v1/remediations?system={}'.format(
+            settings.INSIGHTS_URL_BASE, platform_id)
+
+        remediations = []
+
+        # Iterate over all of the pages of content.
+        while url:
+            data = self._call_insights_api(url, session, headers)
+            remediations.extend(data['data'])
+
+            url = data['links']['next']  # Will be `None` if this is the last page.
+
+        return remediations
+
+    def _get_insights(self, host, session, headers):
+        platform_info = self._get_platform_info(host, session, headers)
+        platform_id = platform_info['id']
+        reports = self._get_reports(platform_id, session, headers)
+        remediations = self._get_remediations(platform_id, session, headers)
+
+        return {
+            'insights_content': filter_insights_api_response(platform_info, reports, remediations)
+        }
 
     def get(self, request, *args, **kwargs):
         host = self.get_object()
         cred = None
 
         if host.insights_system_id is None:
-            return Response(dict(error=_('This host is not recognized as an Insights host.')), status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                dict(error=_('This host is not recognized as an Insights host.')),
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         if host.inventory and host.inventory.insights_credential:
             cred = host.inventory.insights_credential
         else:
-            return Response(dict(error=_('The Insights Credential for "{}" was not found.').format(host.inventory.name)), status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                dict(error=_('The Insights Credential for "{}" was not found.').format(host.inventory.name)),
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-        url = settings.INSIGHTS_URL_BASE + '/r/insights/v3/systems/{}/reports/'.format(host.insights_system_id)
-        (username, password) = self._extract_insights_creds(cred)
-        (msg, err_code) = self.get_insights(url, username, password)
-        return Response(msg, status=err_code)
+        username = cred.get_input('username', default='')
+        password = cred.get_input('password', default='')
+        session = self._get_session(username, password)
+        headers = self._get_headers()
+
+        data = self._get_insights(host, session, headers)
+        return Response(data, status=status.HTTP_200_OK)
+
+    def handle_exception(self, exc):
+        # Continue supporting the slightly different way we have handled error responses on this view.
+        response = super().handle_exception(exc)
+        response.data['error'] = response.data.pop('detail')
+        return response
 
 
 class GroupList(ListCreateAPIView):
@@ -1792,7 +1887,7 @@ class GroupInventorySourcesList(SubListAPIView):
     relationship = 'inventory_sources'
 
 
-class GroupActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class GroupActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -2035,7 +2130,7 @@ class InventorySourceSchedulesList(SubListCreateAPIView):
     parent_key = 'unified_job_template'
 
 
-class InventorySourceActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class InventorySourceActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -2079,12 +2174,16 @@ class InventorySourceHostsList(HostRelatedSearchMixin, SubListDestroyAPIView):
     check_sub_obj_permission = False
 
     def perform_list_destroy(self, instance_list):
-        # Activity stream doesn't record disassociation here anyway
-        # no signals-related reason to not bulk-delete
-        models.Host.groups.through.objects.filter(
-            host__inventory_sources=self.get_parent_object()
-        ).delete()
-        return super(InventorySourceHostsList, self).perform_list_destroy(instance_list)
+        inv_source = self.get_parent_object()
+        with ignore_inventory_computed_fields():
+            # Activity stream doesn't record disassociation here anyway
+            # no signals-related reason to not bulk-delete
+            models.Host.groups.through.objects.filter(
+                host__inventory_sources=inv_source
+            ).delete()
+            r = super(InventorySourceHostsList, self).perform_list_destroy(instance_list)
+        update_inventory_computed_fields.delay(inv_source.inventory_id, True)
+        return r
 
 
 class InventorySourceGroupsList(SubListDestroyAPIView):
@@ -2096,11 +2195,15 @@ class InventorySourceGroupsList(SubListDestroyAPIView):
     check_sub_obj_permission = False
 
     def perform_list_destroy(self, instance_list):
-        # Same arguments for bulk delete as with host list
-        models.Group.hosts.through.objects.filter(
-            group__inventory_sources=self.get_parent_object()
-        ).delete()
-        return super(InventorySourceGroupsList, self).perform_list_destroy(instance_list)
+        inv_source = self.get_parent_object()
+        with ignore_inventory_computed_fields():
+            # Same arguments for bulk delete as with host list
+            models.Group.hosts.through.objects.filter(
+                group__inventory_sources=inv_source
+            ).delete()
+            r = super(InventorySourceGroupsList, self).perform_list_destroy(instance_list)
+        update_inventory_computed_fields.delay(inv_source.inventory_id, True)
+        return r
 
 
 class InventorySourceUpdatesList(SubListAPIView):
@@ -2438,20 +2541,10 @@ class JobTemplateSurveySpec(GenericAPIView):
 
     def get(self, request, *args, **kwargs):
         obj = self.get_object()
-        if not feature_enabled('surveys'):
-            raise LicenseForbids(_('Your license does not allow '
-                                   'adding surveys.'))
-
         return Response(obj.display_survey_spec())
 
     def post(self, request, *args, **kwargs):
         obj = self.get_object()
-
-        # Sanity check: Are surveys available on this license?
-        # If not, do not allow them to be used.
-        if not feature_enabled('surveys'):
-            raise LicenseForbids(_('Your license does not allow '
-                                   'adding surveys.'))
 
         if not request.user.can_access(self.model, 'change', obj, None):
             raise PermissionDenied()
@@ -2521,7 +2614,7 @@ class JobTemplateSurveySpec(GenericAPIView):
                 ).format(
                     allowed_types=', '.join(JobTemplateSurveySpec.ALLOWED_TYPES.keys()), **context
                 )))
-            if 'default' in survey_item:
+            if 'default' in survey_item and survey_item['default'] != '':
                 if not isinstance(survey_item['default'], JobTemplateSurveySpec.ALLOWED_TYPES[qtype]):
                     type_label = 'string'
                     if qtype in ['integer', 'float']:
@@ -2580,12 +2673,12 @@ class JobTemplateSurveySpec(GenericAPIView):
         return Response()
 
 
-class WorkflowJobTemplateSurveySpec(WorkflowsEnforcementMixin, JobTemplateSurveySpec):
+class WorkflowJobTemplateSurveySpec(JobTemplateSurveySpec):
 
     model = models.WorkflowJobTemplate
 
 
-class JobTemplateActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class JobTemplateActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -2903,14 +2996,14 @@ class JobTemplateCopy(CopyAPIView):
     copy_return_serializer_class = serializers.JobTemplateSerializer
 
 
-class WorkflowJobNodeList(WorkflowsEnforcementMixin, ListAPIView):
+class WorkflowJobNodeList(ListAPIView):
 
     model = models.WorkflowJobNode
     serializer_class = serializers.WorkflowJobNodeListSerializer
     search_fields = ('unified_job_template__name', 'unified_job_template__description',)
 
 
-class WorkflowJobNodeDetail(WorkflowsEnforcementMixin, RetrieveAPIView):
+class WorkflowJobNodeDetail(RetrieveAPIView):
 
     model = models.WorkflowJobNode
     serializer_class = serializers.WorkflowJobNodeDetailSerializer
@@ -2924,14 +3017,14 @@ class WorkflowJobNodeCredentialsList(SubListAPIView):
     relationship = 'credentials'
 
 
-class WorkflowJobTemplateNodeList(WorkflowsEnforcementMixin, ListCreateAPIView):
+class WorkflowJobTemplateNodeList(ListCreateAPIView):
 
     model = models.WorkflowJobTemplateNode
     serializer_class = serializers.WorkflowJobTemplateNodeSerializer
     search_fields = ('unified_job_template__name', 'unified_job_template__description',)
 
 
-class WorkflowJobTemplateNodeDetail(WorkflowsEnforcementMixin, RetrieveUpdateDestroyAPIView):
+class WorkflowJobTemplateNodeDetail(RetrieveUpdateDestroyAPIView):
 
     model = models.WorkflowJobTemplateNode
     serializer_class = serializers.WorkflowJobTemplateNodeDetailSerializer
@@ -2942,7 +3035,7 @@ class WorkflowJobTemplateNodeCredentialsList(LaunchConfigCredentialsBase):
     parent_model = models.WorkflowJobTemplateNode
 
 
-class WorkflowJobTemplateNodeChildrenBaseList(WorkflowsEnforcementMixin, EnforceParentRelationshipMixin, SubListCreateAttachDetachAPIView):
+class WorkflowJobTemplateNodeChildrenBaseList(EnforceParentRelationshipMixin, SubListCreateAttachDetachAPIView):
 
     model = models.WorkflowJobTemplateNode
     serializer_class = serializers.WorkflowJobTemplateNodeSerializer
@@ -3004,7 +3097,7 @@ class WorkflowJobTemplateNodeAlwaysNodesList(WorkflowJobTemplateNodeChildrenBase
     relationship = 'always_nodes'
 
 
-class WorkflowJobNodeChildrenBaseList(WorkflowsEnforcementMixin, SubListAPIView):
+class WorkflowJobNodeChildrenBaseList(SubListAPIView):
 
     model = models.WorkflowJobNode
     serializer_class = serializers.WorkflowJobNodeListSerializer
@@ -3034,21 +3127,21 @@ class WorkflowJobNodeAlwaysNodesList(WorkflowJobNodeChildrenBaseList):
     relationship = 'always_nodes'
 
 
-class WorkflowJobTemplateList(WorkflowsEnforcementMixin, ListCreateAPIView):
+class WorkflowJobTemplateList(ListCreateAPIView):
 
     model = models.WorkflowJobTemplate
     serializer_class = serializers.WorkflowJobTemplateSerializer
     always_allow_superuser = False
 
 
-class WorkflowJobTemplateDetail(RelatedJobsPreventDeleteMixin, WorkflowsEnforcementMixin, RetrieveUpdateDestroyAPIView):
+class WorkflowJobTemplateDetail(RelatedJobsPreventDeleteMixin, RetrieveUpdateDestroyAPIView):
 
     model = models.WorkflowJobTemplate
     serializer_class = serializers.WorkflowJobTemplateSerializer
     always_allow_superuser = False
 
 
-class WorkflowJobTemplateCopy(WorkflowsEnforcementMixin, CopyAPIView):
+class WorkflowJobTemplateCopy(CopyAPIView):
 
     model = models.WorkflowJobTemplate
     copy_return_serializer_class = serializers.WorkflowJobTemplateSerializer
@@ -3093,11 +3186,11 @@ class WorkflowJobTemplateCopy(WorkflowsEnforcementMixin, CopyAPIView):
             obj.save()
 
 
-class WorkflowJobTemplateLabelList(WorkflowsEnforcementMixin, JobTemplateLabelList):
+class WorkflowJobTemplateLabelList(JobTemplateLabelList):
     parent_model = models.WorkflowJobTemplate
 
 
-class WorkflowJobTemplateLaunch(WorkflowsEnforcementMixin, RetrieveAPIView):
+class WorkflowJobTemplateLaunch(RetrieveAPIView):
 
 
     model = models.WorkflowJobTemplate
@@ -3146,7 +3239,7 @@ class WorkflowJobTemplateLaunch(WorkflowsEnforcementMixin, RetrieveAPIView):
         return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
 
-class WorkflowJobRelaunch(WorkflowsEnforcementMixin, GenericAPIView):
+class WorkflowJobRelaunch(GenericAPIView):
 
     model = models.WorkflowJob
     obj_permission_type = 'start'
@@ -3178,7 +3271,7 @@ class WorkflowJobRelaunch(WorkflowsEnforcementMixin, GenericAPIView):
         return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
 
-class WorkflowJobTemplateWorkflowNodesList(WorkflowsEnforcementMixin, SubListCreateAPIView):
+class WorkflowJobTemplateWorkflowNodesList(SubListCreateAPIView):
 
     model = models.WorkflowJobTemplateNode
     serializer_class = serializers.WorkflowJobTemplateNodeSerializer
@@ -3191,7 +3284,7 @@ class WorkflowJobTemplateWorkflowNodesList(WorkflowsEnforcementMixin, SubListCre
         return super(WorkflowJobTemplateWorkflowNodesList, self).get_queryset().order_by('id')
 
 
-class WorkflowJobTemplateJobsList(WorkflowsEnforcementMixin, SubListAPIView):
+class WorkflowJobTemplateJobsList(SubListAPIView):
 
     model = models.WorkflowJob
     serializer_class = serializers.WorkflowJobListSerializer
@@ -3200,7 +3293,7 @@ class WorkflowJobTemplateJobsList(WorkflowsEnforcementMixin, SubListAPIView):
     parent_key = 'workflow_job_template'
 
 
-class WorkflowJobTemplateSchedulesList(WorkflowsEnforcementMixin, SubListCreateAPIView):
+class WorkflowJobTemplateSchedulesList(SubListCreateAPIView):
 
     view_name = _("Workflow Job Template Schedules")
 
@@ -3211,7 +3304,7 @@ class WorkflowJobTemplateSchedulesList(WorkflowsEnforcementMixin, SubListCreateA
     parent_key = 'unified_job_template'
 
 
-class WorkflowJobTemplateNotificationTemplatesAnyList(WorkflowsEnforcementMixin, SubListCreateAttachDetachAPIView):
+class WorkflowJobTemplateNotificationTemplatesAnyList(SubListCreateAttachDetachAPIView):
 
     model = models.NotificationTemplate
     serializer_class = serializers.NotificationTemplateSerializer
@@ -3219,7 +3312,7 @@ class WorkflowJobTemplateNotificationTemplatesAnyList(WorkflowsEnforcementMixin,
     relationship = 'notification_templates_any'
 
 
-class WorkflowJobTemplateNotificationTemplatesErrorList(WorkflowsEnforcementMixin, SubListCreateAttachDetachAPIView):
+class WorkflowJobTemplateNotificationTemplatesErrorList(SubListCreateAttachDetachAPIView):
 
     model = models.NotificationTemplate
     serializer_class = serializers.NotificationTemplateSerializer
@@ -3227,7 +3320,7 @@ class WorkflowJobTemplateNotificationTemplatesErrorList(WorkflowsEnforcementMixi
     relationship = 'notification_templates_error'
 
 
-class WorkflowJobTemplateNotificationTemplatesSuccessList(WorkflowsEnforcementMixin, SubListCreateAttachDetachAPIView):
+class WorkflowJobTemplateNotificationTemplatesSuccessList(SubListCreateAttachDetachAPIView):
 
     model = models.NotificationTemplate
     serializer_class = serializers.NotificationTemplateSerializer
@@ -3235,13 +3328,13 @@ class WorkflowJobTemplateNotificationTemplatesSuccessList(WorkflowsEnforcementMi
     relationship = 'notification_templates_success'
 
 
-class WorkflowJobTemplateAccessList(WorkflowsEnforcementMixin, ResourceAccessList):
+class WorkflowJobTemplateAccessList(ResourceAccessList):
 
     model = models.User # needs to be User for AccessLists's
     parent_model = models.WorkflowJobTemplate
 
 
-class WorkflowJobTemplateObjectRolesList(WorkflowsEnforcementMixin, SubListAPIView):
+class WorkflowJobTemplateObjectRolesList(SubListAPIView):
 
     model = models.Role
     serializer_class = serializers.RoleSerializer
@@ -3254,7 +3347,7 @@ class WorkflowJobTemplateObjectRolesList(WorkflowsEnforcementMixin, SubListAPIVi
         return models.Role.objects.filter(content_type=content_type, object_id=po.pk)
 
 
-class WorkflowJobTemplateActivityStreamList(WorkflowsEnforcementMixin, ActivityStreamEnforcementMixin, SubListAPIView):
+class WorkflowJobTemplateActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -3270,19 +3363,19 @@ class WorkflowJobTemplateActivityStreamList(WorkflowsEnforcementMixin, ActivityS
                          Q(workflow_job_template_node__workflow_job_template=parent)).distinct()
 
 
-class WorkflowJobList(WorkflowsEnforcementMixin, ListCreateAPIView):
+class WorkflowJobList(ListCreateAPIView):
 
     model = models.WorkflowJob
     serializer_class = serializers.WorkflowJobListSerializer
 
 
-class WorkflowJobDetail(WorkflowsEnforcementMixin, UnifiedJobDeletionMixin, RetrieveDestroyAPIView):
+class WorkflowJobDetail(UnifiedJobDeletionMixin, RetrieveDestroyAPIView):
 
     model = models.WorkflowJob
     serializer_class = serializers.WorkflowJobSerializer
 
 
-class WorkflowJobWorkflowNodesList(WorkflowsEnforcementMixin, SubListAPIView):
+class WorkflowJobWorkflowNodesList(SubListAPIView):
 
     model = models.WorkflowJobNode
     serializer_class = serializers.WorkflowJobNodeListSerializer
@@ -3296,7 +3389,7 @@ class WorkflowJobWorkflowNodesList(WorkflowsEnforcementMixin, SubListAPIView):
         return super(WorkflowJobWorkflowNodesList, self).get_queryset().order_by('id')
 
 
-class WorkflowJobCancel(WorkflowsEnforcementMixin, RetrieveAPIView):
+class WorkflowJobCancel(RetrieveAPIView):
 
     model = models.WorkflowJob
     obj_permission_type = 'cancel'
@@ -3312,7 +3405,7 @@ class WorkflowJobCancel(WorkflowsEnforcementMixin, RetrieveAPIView):
             return self.http_method_not_allowed(request, *args, **kwargs)
 
 
-class WorkflowJobNotificationsList(WorkflowsEnforcementMixin, SubListAPIView):
+class WorkflowJobNotificationsList(SubListAPIView):
 
     model = models.Notification
     serializer_class = serializers.NotificationSerializer
@@ -3321,7 +3414,7 @@ class WorkflowJobNotificationsList(WorkflowsEnforcementMixin, SubListAPIView):
     search_fields = ('subject', 'notification_type', 'body',)
 
 
-class WorkflowJobActivityStreamList(WorkflowsEnforcementMixin, ActivityStreamEnforcementMixin, SubListAPIView):
+class WorkflowJobActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -3497,11 +3590,11 @@ class JobLabelList(SubListAPIView):
     parent_key = 'job'
 
 
-class WorkflowJobLabelList(WorkflowsEnforcementMixin, JobLabelList):
+class WorkflowJobLabelList(JobLabelList):
     parent_model = models.WorkflowJob
 
 
-class JobActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class JobActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -3531,7 +3624,6 @@ class JobStart(GenericAPIView):
         )
         if obj.can_start:
             data['passwords_needed_to_start'] = obj.passwords_needed_to_start
-            data['ask_variables_on_launch'] = obj.ask_variables_on_launch
         return Response(data)
 
     def post(self, request, *args, **kwargs):
@@ -3770,6 +3862,12 @@ class JobEventChildrenList(SubListAPIView):
     relationship = 'children'
     view_name = _('Job Event Children List')
     search_fields = ('stdout',)
+
+    def get_queryset(self):
+        parent_event = self.get_parent_object()
+        self.check_parent_access(parent_event)
+        qs = self.request.user.get_queryset(self.model).filter(parent_uuid=parent_event.uuid)
+        return qs
 
 
 class JobEventHostsList(HostRelatedSearchMixin, SubListAPIView):
@@ -4014,7 +4112,7 @@ class AdHocCommandAdHocCommandEventsList(BaseAdHocCommandEventsList):
     parent_model = models.AdHocCommand
 
 
-class AdHocCommandActivityStreamList(ActivityStreamEnforcementMixin, SubListAPIView):
+class AdHocCommandActivityStreamList(SubListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
@@ -4077,12 +4175,14 @@ class UnifiedJobTemplateList(ListAPIView):
 
     model = models.UnifiedJobTemplate
     serializer_class = serializers.UnifiedJobTemplateSerializer
+    search_fields = ('description', 'name', 'jobtemplate__playbook',)
 
 
 class UnifiedJobList(ListAPIView):
 
     model = models.UnifiedJob
     serializer_class = serializers.UnifiedJobListSerializer
+    search_fields = ('description', 'name', 'job__playbook',)
 
 
 def redact_ansi(line):
@@ -4310,14 +4410,14 @@ class LabelDetail(RetrieveUpdateAPIView):
     serializer_class = serializers.LabelSerializer
 
 
-class ActivityStreamList(ActivityStreamEnforcementMixin, SimpleListAPIView):
+class ActivityStreamList(SimpleListAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer
     search_fields = ('changes',)
 
 
-class ActivityStreamDetail(ActivityStreamEnforcementMixin, RetrieveAPIView):
+class ActivityStreamDetail(RetrieveAPIView):
 
     model = models.ActivityStream
     serializer_class = serializers.ActivityStreamSerializer

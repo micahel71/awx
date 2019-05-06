@@ -26,7 +26,7 @@ from awx.main.models.unified_jobs import UnifiedJob
 from awx.main.utils import get_cpu_capacity, get_mem_capacity, get_system_task_capacity
 from awx.main.models.mixins import RelatedJobsMixin
 
-__all__ = ('Instance', 'InstanceGroup', 'JobOrigin', 'TowerScheduleState',)
+__all__ = ('Instance', 'InstanceGroup', 'JobOrigin', 'TowerScheduleState', 'TowerAnalyticsState')
 
 
 class HasPolicyEditsMixin(HasEditsMixin):
@@ -172,7 +172,8 @@ class InstanceGroup(HasPolicyEditsMixin, BaseModel, RelatedJobsMixin):
         help_text=_('Instance Group to remotely control this group.'),
         editable=False,
         default=None,
-        null=True
+        null=True,
+        on_delete=models.CASCADE
     )
     policy_instance_percentage = models.IntegerField(
         default=0,
@@ -207,6 +208,14 @@ class InstanceGroup(HasPolicyEditsMixin, BaseModel, RelatedJobsMixin):
     @property
     def jobs_total(self):
         return UnifiedJob.objects.filter(instance_group=self).count()
+
+    @property
+    def is_controller(self):
+        return self.controlled_groups.exists()
+
+    @property
+    def is_isolated(self):
+        return bool(self.controller)
 
     '''
     RelatedJobsMixin
@@ -251,6 +260,10 @@ class TowerScheduleState(SingletonModel):
     schedule_last_run = models.DateTimeField(auto_now_add=True)
 
 
+class TowerAnalyticsState(SingletonModel):
+    last_run = models.DateTimeField(auto_now_add=True)
+
+
 class JobOrigin(models.Model):
     """A model representing the relationship between a unified job and
     the instance that was responsible for starting that job.
@@ -260,8 +273,8 @@ class JobOrigin(models.Model):
     This is fine, and code should be able to handle it. A job with no origin
     is always assumed to *not* have the current instance as its origin.
     """
-    unified_job = models.OneToOneField(UnifiedJob, related_name='job_origin')
-    instance = models.ForeignKey(Instance)
+    unified_job = models.OneToOneField(UnifiedJob, related_name='job_origin', on_delete=models.CASCADE)
+    instance = models.ForeignKey(Instance, on_delete=models.CASCADE)
     created = models.DateTimeField(auto_now_add=True)
     modified = models.DateTimeField(auto_now=True)
 

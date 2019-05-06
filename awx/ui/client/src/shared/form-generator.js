@@ -518,11 +518,11 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                     html += "\"><div class='ScheduleToggle' ng-class='{\"is-on\": " + form.iterator + ".";
                     html += (field.flag) ? field.flag : "enabled";
                     html += (field.ngDisabled) ? ', "ScheduleToggle--disabled": ' + field.ngDisabled : '';
-                    html += "\}' aw-tool-tip='" + field.awToolTip + "' data-placement='" + field.dataPlacement + "' data-tip-watch='" + field.dataTipWatch + "'><button ng-show='" + form.iterator + "." ;
+                    html += "\}' aw-tool-tip='" + field.awToolTip + "' data-placement='" + field.dataPlacement + "' data-tip-watch='" + field.dataTipWatch + "'><button type='button' ng-show='" + form.iterator + "." ;
                     html += (field.flag) ? field.flag : 'enabled';
                     html += "' ";
                     html += (field.ngDisabled) ? `ng-disabled="${field.ngDisabled}" ` : "";
-                    html += " class='ScheduleToggle-switch is-on' ng-click='" + field.ngClick + "' translate>" + i18n._("ON") + "</button><button ng-show='!" + form.iterator + "." ;
+                    html += " class='ScheduleToggle-switch is-on' ng-click='" + field.ngClick + "' translate>" + i18n._("ON") + "</button><button type='button' ng-show='!" + form.iterator + "." ;
                     html += (field.flag) ? field.flag : "enabled";
                     html += "' ";
                     html += (field.ngDisabled) ? `ng-disabled="${field.ngDisabled}" ` : "";
@@ -718,7 +718,6 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                     html += "'";
                     html += (field.ngShow) ? this.attr(field, 'ngShow') : "";
                     html += (field.ngHide) ? this.attr(field, 'ngHide') : "";
-                    html += (field.awFeature) ? "aw-feature=\"" + field.awFeature + "\" " : "";
                     html += ">\n";
 
                     var definedInFileMessage = i18n._('This setting has been set manually in a settings file and is now disabled.');
@@ -745,9 +744,9 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                         html += `<div class="ScheduleToggle" ng-class="{'is-on': ${field.toggleSource}, 'ScheduleToggle--disabled': ${field.ngDisabled}}" aw-tool-tip="" `;
                         html += (field.ngShow) ? "ng-show=\"" + field.ngShow + "\" " : "";
                         html += `data-placement="top">`;
-                        html += `<button ng-show="${field.toggleSource}" class="ScheduleToggle-switch is-on" ng-click="toggleForm('${field.toggleSource}')"
+                        html += `<button type="button" ng-show="${field.toggleSource}" class="ScheduleToggle-switch is-on" ng-click="toggleForm('${field.toggleSource}')"
                                 ng-disabled="${field.ngDisabled}" translate>${i18n._("ON")}</button>
-                            <button ng-show="!${field.toggleSource}" class="ScheduleToggle-switch" ng-click="toggleForm('${field.toggleSource}')"
+                            <button type="button" ng-show="!${field.toggleSource}" class="ScheduleToggle-switch" ng-click="toggleForm('${field.toggleSource}')"
                                 ng-disabled="${field.ngDisabled}" translate>${i18n._("OFF")}</button>
                         </div>`;
                     }
@@ -1364,6 +1363,18 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                         html += "</div>\n";
                     }
 
+                    if (field.type === 'code_mirror') {
+                        html += '<at-code-mirror ';
+                        html += `id="${form.name}_${fld}" `;
+                        html += `class="${field.class}" `;
+                        html += `label="${field.label}" `;
+                        html += `tooltip="${field.awPopOver}" `;
+                        html += `name="${fld}" `;
+                        html += `variables="${field.variables}" `;
+                        html += `ng-disabled="${field.ngDisabled}" `;
+                        html += '></at-code-mirror>';
+                    }
+
                     if (field.type === 'custom') {
                         let labelOptions = {};
 
@@ -1418,6 +1429,8 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                             "ng-show='ldap_user'>LDAP</span>";
                         html+= "<span class=\"Form-title--is_external_account\" "+
                             "ng-show='external_account'>{{external_account}}</span>";
+                        html+= "<span class=\"Form-title--last_login\" "+
+                            "ng-show='last_login'>" + i18n._("Last logged in: ") + "{{ last_login | longDate }}</span>";
                     }
                     if(this.form.name === "smartinventory"){
                         html+= "<span class=\"Form-title--is_smartinventory\" "+
@@ -1467,7 +1480,13 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                                 `aw-tip-placement="${collection.dataPlacement}" ` +
                                 `data-tip-watch="${collection.dataTipWatch}" `;
                             }
-                            let relatedTabSelected = this.form.activeEditState ? `$state.includes('${this.form.activeEditState}.${itm}') || $state.includes('${this.form.stateTree}.edit.${itm}')` : `$state.includes('${this.form.stateTree}.edit.${itm}')`;
+                            let relatedTabSelected;
+                            if (this.form.related[itm].tabSelected) {
+                                relatedTabSelected = this.form.related[itm].tabSelected;
+                            } else {
+                                relatedTabSelected = this.form.activeEditState ? `$state.includes('${this.form.activeEditState}.${itm}') || $state.includes('${this.form.stateTree}.edit.${itm}')` : `$state.includes('${this.form.stateTree}.edit.${itm}')`;
+                            }
+
                             html += `ng-class="{'is-selected' : ${relatedTabSelected}` ;
                             if(this.form.related[itm].disabled){
                                 html += `, 'Form-tab--disabled' : ${this.form.related[itm].disabled }`;
@@ -1490,9 +1509,6 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                             }
                             if (button.ngClick) {
                                 html += this.attr(button, 'ngClick');
-                            }
-                            if (button.awFeature) {
-                                html += this.attr(button, 'awFeature');
                             }
                             if (button.ngDisabled) {
                                 ngDisabled = (button.ngDisabled===true) ? this.form.name+"_form.$invalid" : button.ngDisabled;
@@ -1540,9 +1556,6 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
 
                             if(button.ngShow){
                                 html += this.attr(button, 'ngShow');
-                            }
-                            if (button.awFeature) {
-                                html += this.attr(button, 'awFeature');
                             }
                             if(button.awToolTip) {
                                 html += " aw-tool-tip='" + button.awToolTip + "' data-placement='" + button.dataPlacement + "' data-tip-watch='" + button.dataTipWatch + "'";
@@ -1654,90 +1667,91 @@ angular.module('FormGenerator', [GeneratorHelpers.name, 'Utilities', listGenerat
                             if (typeof this.form.buttons[btn] === 'object') {
                                 button = this.form.buttons[btn];
 
-                                // Set default color and label for Save and Reset
-                                if (btn === 'save') {
-                                    button.label = i18n._('Save');
-                                    button['class'] = 'Form-saveButton';
-                                }
-                                if (btn === 'select') {
-                                    button.label = i18n._('Select');
-                                    button['class'] = 'Form-saveButton';
-                                }
-                                if (btn === 'cancel') {
-                                    button.label = i18n._('Cancel');
-                                    button['class'] = 'Form-cancelButton';
-                                }
-                                if (btn === 'close') {
-                                    button.label = i18n._('Close');
-                                    button['class'] = 'Form-cancelButton';
-                                }
-                                if (btn === 'launch') {
-                                    button.label = i18n._('Launch');
-                                    button['class'] = 'Form-launchButton';
-                                }
-                                if (btn === 'add_survey') {
-                                    button.label = i18n._('Add Survey');
-                                    button['class'] = 'Form-surveyButton';
-                                }
-                                if (btn === 'edit_survey') {
-                                    button.label =  i18n._('Edit Survey');
-                                    button['class'] = 'Form-surveyButton';
-                                }
-                                if (btn === 'view_survey') {
-                                    button.label = i18n._('View Survey');
-                                    button['class'] = 'Form-surveyButton';
-                                }
-                                if (btn === 'workflow_visualizer') {
-                                    button.label = i18n._('Workflow Visualizer');
-                                    button['class'] = 'Form-primaryButton';
-                                }
-
-                                // Build button HTML
-                                html += "<button type=\"button\" ";
-                                html += "class=\"btn btn-sm";
-                                html += (button['class']) ? " " + button['class'] : "";
-                                html += "\" ";
-                                html += "id=\"" + this.form.name + "_" + btn + "_btn\" ";
-
-                                if(button.ngShow){
-                                    html += this.attr(button, 'ngShow');
-                                }
-                                if (button.ngClick) {
-                                    html += this.attr(button, 'ngClick');
-                                }
-                                if (button.awFeature) {
-                                    html += this.attr(button, 'awFeature');
-                                }
-                                if (button.ngDisabled) {
-                                    ngDisabled = (button.ngDisabled===true) ? `${this.form.name}_form.$invalid ||  ${this.form.name}_form.$pending`: button.ngDisabled;
-                                    if (btn !== 'reset') {
-                                        //html += "ng-disabled=\"" + this.form.name + "_form.$pristine || " + this.form.name + "_form.$invalid";
-
-                                        if (button.disabled && button.disable !== true) {
-                                            // Allow disabled to overrule ng-disabled. Used for permissions.
-                                            // Example: system auditor can view but not update. Form validity
-                                            // is no longer a concern but ng-disabled will update disabled
-                                            // status on render so we stop applying it here.
-                                        } else {
-                                            html += "ng-disabled=\"" + ngDisabled;
-                                            //html += (this.form.allowReadonly) ? " || " + this.form.name + "ReadOnly == true" : "";
-                                            html += "\" ";
-                                        }
-
-                                    } else {
-                                        //html += "ng-disabled=\"" + this.form.name + "_form.$pristine";
-                                        //html += (this.form.allowReadonly) ? " || " + this.form.name + "ReadOnly == true" : "";
-                                        //html += "\" ";
+                                if (button.component === 'at-launch-template') {
+                                    html += `<at-launch-template template="${button.templateObj}" ng-show="${button.ngShow}" disabled="${button.ngDisabled}" show-text-button="${button.showTextButton}"></at-launch-template>`;
+                                } else {
+                                    // Set default color and label for Save and Reset
+                                    if (btn === 'save') {
+                                        button.label = i18n._('Save');
+                                        button['class'] = 'Form-saveButton';
                                     }
+                                    if (btn === 'select') {
+                                        button.label = i18n._('Select');
+                                        button['class'] = 'Form-saveButton';
+                                    }
+                                    if (btn === 'cancel') {
+                                        button.label = i18n._('Cancel');
+                                        button['class'] = 'Form-cancelButton';
+                                    }
+                                    if (btn === 'close') {
+                                        button.label = i18n._('Close');
+                                        button['class'] = 'Form-cancelButton';
+                                    }
+                                    if (btn === 'launch') {
+                                        button.label = i18n._('Launch');
+                                        button['class'] = 'Form-launchButton';
+                                    }
+                                    if (btn === 'add_survey') {
+                                        button.label = i18n._('Add Survey');
+                                        button['class'] = 'Form-surveyButton';
+                                    }
+                                    if (btn === 'edit_survey') {
+                                        button.label =  i18n._('Edit Survey');
+                                        button['class'] = 'Form-surveyButton';
+                                    }
+                                    if (btn === 'view_survey') {
+                                        button.label = i18n._('View Survey');
+                                        button['class'] = 'Form-surveyButton';
+                                    }
+                                    if (btn === 'workflow_visualizer') {
+                                        button.label = i18n._('Workflow Visualizer');
+                                        button['class'] = 'Form-primaryButton';
+                                    }
+
+                                    // Build button HTML
+                                    html += "<button type=\"button\" ";
+                                    html += "class=\"btn btn-sm";
+                                    html += (button['class']) ? " " + button['class'] : "";
+                                    html += "\" ";
+                                    html += "id=\"" + this.form.name + "_" + btn + "_btn\" ";
+
+                                    if(button.ngShow){
+                                        html += this.attr(button, 'ngShow');
+                                    }
+                                    if (button.ngClick) {
+                                        html += this.attr(button, 'ngClick');
+                                    }
+                                    if (button.ngDisabled) {
+                                        ngDisabled = (button.ngDisabled===true) ? `${this.form.name}_form.$invalid ||  ${this.form.name}_form.$pending`: button.ngDisabled;
+                                        if (btn !== 'reset') {
+                                            //html += "ng-disabled=\"" + this.form.name + "_form.$pristine || " + this.form.name + "_form.$invalid";
+
+                                            if (button.disabled && button.disable !== true) {
+                                                // Allow disabled to overrule ng-disabled. Used for permissions.
+                                                // Example: system auditor can view but not update. Form validity
+                                                // is no longer a concern but ng-disabled will update disabled
+                                                // status on render so we stop applying it here.
+                                            } else {
+                                                html += "ng-disabled=\"" + ngDisabled;
+                                                //html += (this.form.allowReadonly) ? " || " + this.form.name + "ReadOnly == true" : "";
+                                                html += "\" ";
+                                            }
+
+                                        } else {
+                                            //html += "ng-disabled=\"" + this.form.name + "_form.$pristine";
+                                            //html += (this.form.allowReadonly) ? " || " + this.form.name + "ReadOnly == true" : "";
+                                            //html += "\" ";
+                                        }
+                                    }
+                                    if (button.disabled && button.disable !== true) {
+                                        html += ` disabled="disabled" `;
+                                    }
+                                    if(button.awToolTip) {
+                                        html += " aw-tool-tip='" + button.awToolTip + "' data-placement='" + button.dataPlacement + "' data-tip-watch='" + button.dataTipWatch + "'";
+                                    }
+                                    html += ">";
+                                    html += " " + button.label + "</button>\n";
                                 }
-                                if (button.disabled && button.disable !== true) {
-                                    html += ` disabled="disabled" `;
-                                }
-                                if(button.awToolTip) {
-                                    html += " aw-tool-tip='" + button.awToolTip + "' data-placement='" + button.dataPlacement + "' data-tip-watch='" + button.dataTipWatch + "'";
-                                }
-                                html += ">";
-                                html += " " + button.label + "</button>\n";
                             }
                         }
                         html += "</div><!-- buttons -->\n";

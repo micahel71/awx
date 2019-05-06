@@ -5,6 +5,7 @@ import os
 import re  # noqa
 import sys
 from datetime import timedelta
+from celery.schedules import crontab
 
 # global settings
 from django.conf import global_settings
@@ -165,6 +166,8 @@ REMOTE_HOST_HEADERS = ['REMOTE_ADDR', 'REMOTE_HOST']
 # If this setting is an empty list (the default), the headers specified by
 # REMOTE_HOST_HEADERS will be trusted unconditionally')
 PROXY_IP_WHITELIST = []
+
+CUSTOM_VENV_PATHS = []
 
 # Note: This setting may be overridden by database settings.
 STDOUT_MAX_BYTES_DISPLAY = 1048576
@@ -452,7 +455,6 @@ except ImportError:
     pass
 
 DEBUG_TOOLBAR_CONFIG = {
-    'INTERCEPT_REDIRECTS': False,
     'ENABLE_STACKTRACES' : True,
 }
 
@@ -484,16 +486,16 @@ CELERYBEAT_SCHEDULE = {
         'task': 'awx.main.tasks.purge_old_stdout_files',
         'schedule': timedelta(days=7)
     },
+    'gather_analytics': {
+        'task': 'awx.main.tasks.gather_analytics',
+        'schedule': crontab(hour=0)
+    },
     'task_manager': {
         'task': 'awx.main.scheduler.tasks.run_task_manager',
         'schedule': timedelta(seconds=20),
         'options': {'expires': 20}
     },
-    'isolated_heartbeat': {
-        'task': 'awx.main.tasks.awx_isolated_heartbeat',
-        'schedule': timedelta(seconds=AWX_ISOLATED_PERIODIC_CHECK),
-        'options': {'expires': AWX_ISOLATED_PERIODIC_CHECK * 2},
-    }
+    # 'isolated_heartbeat': set up at the end of production.py and development.py
 }
 AWX_INCONSISTENT_TASK_INTERVAL = 60 * 3
 
@@ -665,6 +667,11 @@ AWX_AUTO_DEPROVISION_INSTANCES = False
 # Note: This setting may be overridden by database settings.
 PENDO_TRACKING_STATE = "off"
 
+# Enables Insights data collection for Ansible Tower.
+# Note: This setting may be overridden by database settings.
+INSIGHTS_TRACKING_STATE = False
+
+
 # Default list of modules allowed for ad hoc commands.
 # Note: This setting may be overridden by database settings.
 AD_HOC_COMMANDS = [
@@ -806,7 +813,7 @@ GCE_ENABLED_VALUE = 'running'
 GCE_GROUP_FILTER = r'^.+$'
 GCE_HOST_FILTER = r'^.+$'
 GCE_EXCLUDE_EMPTY_GROUPS = True
-GCE_INSTANCE_ID_VAR = None
+GCE_INSTANCE_ID_VAR = 'gce_id'
 
 # --------------------------------------
 # -- Microsoft Azure Resource Manager --
@@ -907,7 +914,7 @@ CLOUDFORMS_INSTANCE_ID_VAR = 'cloudforms.id'
 #CUSTOM_ENABLED_VALUE =
 CUSTOM_GROUP_FILTER = r'^.+$'
 CUSTOM_HOST_FILTER = r'^.+$'
-CUSTOM_EXCLUDE_EMPTY_GROUPS = True
+CUSTOM_EXCLUDE_EMPTY_GROUPS = False
 #CUSTOM_INSTANCE_ID_VAR =
 
 # ---------------------
@@ -917,7 +924,7 @@ CUSTOM_EXCLUDE_EMPTY_GROUPS = True
 #SCM_ENABLED_VALUE =
 SCM_GROUP_FILTER = r'^.+$'
 SCM_HOST_FILTER = r'^.+$'
-SCM_EXCLUDE_EMPTY_GROUPS = True
+SCM_EXCLUDE_EMPTY_GROUPS = False
 #SCM_INSTANCE_ID_VAR =
 
 # ---------------------
@@ -934,7 +941,6 @@ INTERNAL_API_URL = 'http://127.0.0.1:%s' % DEVSERVER_DEFAULT_PORT
 PERSISTENT_CALLBACK_MESSAGES = True
 USE_CALLBACK_QUEUE = True
 CALLBACK_QUEUE = "callback_tasks"
-FACT_QUEUE = "facts"
 
 SCHEDULER_QUEUE = "scheduler"
 
@@ -956,6 +962,7 @@ TOWER_ADMIN_ALERTS = True
 TOWER_URL_BASE = "https://towerhost"
 
 INSIGHTS_URL_BASE = "https://example.org"
+INSIGHTS_AGENT_MIME = 'application/example'
 
 TOWER_SETTINGS_MANIFEST = {}
 
@@ -1087,15 +1094,6 @@ LOGGING = {
             'backupCount': 5,
             'formatter':'simple',
         },
-        'fact_receiver': {
-            'level': 'WARNING',
-            'class':'logging.handlers.RotatingFileHandler',
-            'filters': ['require_debug_false'],
-            'filename': os.path.join(LOG_ROOT, 'fact_receiver.log'),
-            'maxBytes': 1024 * 1024 * 5, # 5 MB
-            'backupCount': 5,
-            'formatter':'simple',
-        },
         'system_tracking_migrations': {
             'level': 'WARNING',
             'class':'logging.handlers.RotatingFileHandler',
@@ -1210,3 +1208,6 @@ SILENCED_SYSTEM_CHECKS = ['models.E006']
 
 # Use middleware to get request statistics
 AWX_REQUEST_PROFILE = False
+
+# Delete temporary directories created to store playbook run-time
+AWX_CLEANUP_PATHS = True

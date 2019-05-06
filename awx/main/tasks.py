@@ -1,22 +1,22 @@
+# -*- coding: utf-8 -*-
+
 # Copyright (c) 2015 Ansible, Inc.
 # All Rights Reserved.
 
 # Python
 from collections import OrderedDict, namedtuple
-import configparser
 import errno
-import fnmatch
 import functools
 import importlib
 import json
 import logging
 import os
-import re
 import shutil
 import stat
 import tempfile
 import time
 import traceback
+from distutils.dir_util import copy_tree
 from distutils.version import LooseVersion as Version
 import yaml
 import fcntl
@@ -24,7 +24,6 @@ try:
     import psutil
 except Exception:
     psutil = None
-from io import StringIO
 import urllib.parse as urlparse
 
 # Django
@@ -42,6 +41,9 @@ from django.core.exceptions import ObjectDoesNotExist
 # Django-CRUM
 from crum import impersonate
 
+# Runner
+import ansible_runner
+
 # AWX
 from awx import __version__ as awx_application_version
 from awx.main.constants import CLOUD_PROVIDERS, PRIVILEGE_ESCALATION_METHODS, STANDARD_INVENTORY_UPDATE_ENV
@@ -49,27 +51,30 @@ from awx.main.access import access_registry
 from awx.main.models import (
     Schedule, TowerScheduleState, Instance, InstanceGroup,
     UnifiedJob, Notification,
-    Inventory, SmartInventoryMembership,
+    Inventory, InventorySource, SmartInventoryMembership,
     Job, AdHocCommand, ProjectUpdate, InventoryUpdate, SystemJob,
-    Project,
     JobEvent, ProjectUpdateEvent, InventoryUpdateEvent, AdHocCommandEvent, SystemJobEvent,
     build_safe_env
 )
 from awx.main.constants import ACTIVE_STATES
 from awx.main.exceptions import AwxTaskError
 from awx.main.queue import CallbackQueueDispatcher
-from awx.main.expect import run, isolated_manager
+from awx.main.isolated import manager as isolated_manager
 from awx.main.dispatch.publish import task
 from awx.main.dispatch import get_local_queuename, reaper
-from awx.main.utils import (get_ansible_version, get_ssh_version, update_scm_url,
-                            check_proot_installed, build_proot_temp_dir, get_licenser,
-                            wrap_args_with_proot, OutputEventFilter, OutputVerboseFilter, ignore_inventory_computed_fields,
-                            ignore_inventory_group_removal, extract_ansible_vars, schedule_task_manager)
+from awx.main.utils import (get_ssh_version, update_scm_url,
+                            get_licenser,
+                            ignore_inventory_computed_fields,
+                            ignore_inventory_group_removal, extract_ansible_vars, schedule_task_manager,
+                            get_awx_version)
+from awx.main.utils.common import _get_ansible_version, get_custom_venv_choices
 from awx.main.utils.safe_yaml import safe_dump, sanitize_jinja
 from awx.main.utils.reload import stop_local_services
 from awx.main.utils.pglock import advisory_lock
 from awx.main.consumers import emit_channel_notification
+from awx.main import analytics
 from awx.conf import settings_registry
+from awx.conf.license import get_license
 
 from rest_framework.exceptions import PermissionDenied
 
@@ -88,6 +93,12 @@ Try upgrading OpenSSH or providing your private key in an different format. \
 '''
 
 logger = logging.getLogger('awx.main.tasks')
+
+
+class InvalidVirtualenvError(Exception):
+
+    def __init__(self, message):
+        self.message = message
 
 
 def dispatch_startup():
@@ -277,6 +288,20 @@ def delete_project_files(project_path):
             logger.exception('Could not remove lock file {}'.format(lock_file))
 
 
+@task(queue='tower_broadcast_all', exchange_type='fanout')
+def profile_sql(threshold=1, minutes=1):
+    if threshold == 0:
+        cache.delete('awx-profile-sql-threshold')
+        logger.error('SQL PROFILING DISABLED')
+    else:
+        cache.set(
+            'awx-profile-sql-threshold',
+            threshold,
+            timeout=minutes * 60
+        )
+        logger.error('SQL QUERIES >={}s ENABLED FOR {} MINUTE(S)'.format(threshold, minutes))
+
+
 @task()
 def send_notifications(notification_list, job_id=None):
     if not isinstance(notification_list, list):
@@ -304,6 +329,19 @@ def send_notifications(notification_list, job_id=None):
                 notification.save(update_fields=update_fields)
             except Exception:
                 logger.exception('Error saving notification {} result.'.format(notification.id))
+
+
+@task()
+def gather_analytics():
+    if settings.PENDO_TRACKING_STATE == 'off':
+        return
+    try:
+        tgz = analytics.gather()
+        logger.debug('gathered analytics: {}'.format(tgz))
+        analytics.ship(tgz)
+    finally:
+        if os.path.exists(tgz):
+            os.remove(tgz)
 
 
 @task()
@@ -438,7 +476,7 @@ def awx_isolated_heartbeat():
     # Slow pass looping over isolated IGs and their isolated instances
     if len(isolated_instance_qs) > 0:
         logger.debug("Managing isolated instances {}.".format(','.join([inst.hostname for inst in isolated_instance_qs])))
-        isolated_manager.IsolatedManager.health_check(isolated_instance_qs, awx_application_version)
+        isolated_manager.IsolatedManager().health_check(isolated_instance_qs)
 
 
 @task()
@@ -697,6 +735,12 @@ class BaseTask(object):
                 logger.error('Failed to update %s after %d retries.',
                              self.model._meta.object_name, _attempt)
 
+    def get_ansible_version(self, instance):
+        if not hasattr(self, '_ansible_version'):
+            self._ansible_version = _get_ansible_version(
+                ansible_path=self.get_path_to_ansible(instance, executable='ansible'))
+        return self._ansible_version
+
     def get_path_to(self, *args):
         '''
         Return absolute path relative to this file.
@@ -710,22 +754,26 @@ class BaseTask(object):
             return venv_exe
         return shutil.which(executable)
 
-    def build_private_data(self, job, **kwargs):
+    def build_private_data(self, instance, private_data_dir):
         '''
         Return SSH private key data (only if stored in DB as ssh_key_data).
         Return structure is a dict of the form:
         '''
 
-    def build_private_data_dir(self, instance, **kwargs):
+    def build_private_data_dir(self, instance):
         '''
         Create a temporary directory for job-related files.
         '''
         path = tempfile.mkdtemp(prefix='awx_%s_' % instance.pk, dir=settings.AWX_PROOT_BASE_PATH)
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-        self.cleanup_paths.append(path)
+        if settings.AWX_CLEANUP_PATHS:
+            self.cleanup_paths.append(path)
+        # Ansible Runner requires that this directory exists.
+        # Specifically, when using process isolation
+        os.mkdir(os.path.join(path, 'project'))
         return path
 
-    def build_private_data_files(self, instance, **kwargs):
+    def build_private_data_files(self, instance, private_data_dir):
         '''
         Creates temporary files containing the private data.
         Returns a dictionary i.e.,
@@ -734,11 +782,16 @@ class BaseTask(object):
             'credentials': {
                 <awx.main.models.Credential>: '/path/to/decrypted/data',
                 <awx.main.models.Credential>: '/path/to/decrypted/data',
-                <awx.main.models.Credential>: '/path/to/decrypted/data',
+                ...
+            },
+            'certificates': {
+                <awx.main.models.Credential>: /path/to/signed/ssh/certificate,
+                <awx.main.models.Credential>: /path/to/signed/ssh/certificate,
+                ...
             }
         }
         '''
-        private_data = self.build_private_data(instance, **kwargs)
+        private_data = self.build_private_data(instance, private_data_dir)
         private_data_files = {'credentials': {}}
         if private_data is not None:
             ssh_ver = get_ssh_version()
@@ -749,7 +802,6 @@ class BaseTask(object):
                 # and we're running an earlier version (<6.5).
                 if 'OPENSSH PRIVATE KEY' in data and not openssh_keys_supported:
                     raise RuntimeError(OPENSSH_KEY_ERROR)
-            for credential, data in private_data.get('credentials', {}).items():
                 # OpenSSH formatted keys must have a trailing newline to be
                 # accepted by ssh-add.
                 if 'OPENSSH PRIVATE KEY' in data and not data.endswith('\n'):
@@ -757,23 +809,34 @@ class BaseTask(object):
                 # For credentials used with ssh-add, write to a named pipe which
                 # will be read then closed, instead of leaving the SSH key on disk.
                 if credential and credential.kind in ('ssh', 'scm') and not ssh_too_old:
-                    name = 'credential_%d' % credential.pk
-                    path = os.path.join(kwargs['private_data_dir'], name)
-                    run.open_fifo_write(path, data)
+                    try:
+                        os.mkdir(os.path.join(private_data_dir, 'env'))
+                    except OSError as e:
+                        if e.errno != errno.EEXIST:
+                            raise
+                    path = os.path.join(private_data_dir, 'env', 'ssh_key')
+                    ansible_runner.utils.open_fifo_write(path, data.encode())
                     private_data_files['credentials']['ssh'] = path
                 # Ansible network modules do not yet support ssh-agent.
                 # Instead, ssh private key file is explicitly passed via an
                 # env variable.
                 else:
-                    handle, path = tempfile.mkstemp(dir=kwargs.get('private_data_dir', None))
+                    handle, path = tempfile.mkstemp(dir=private_data_dir)
                     f = os.fdopen(handle, 'w')
                     f.write(data)
                     f.close()
                     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
                 private_data_files['credentials'][credential] = path
+            for credential, data in private_data.get('certificates', {}).items():
+                name = 'credential_%d-cert.pub' % credential.pk
+                path = os.path.join(private_data_dir, name)
+                with open(path, 'w') as f:
+                    f.write(data)
+                    f.close()
+                os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
         return private_data_files
 
-    def build_passwords(self, instance, **kwargs):
+    def build_passwords(self, instance, runtime_passwords):
         '''
         Build a dictionary of passwords for responding to prompts.
         '''
@@ -783,43 +846,75 @@ class BaseTask(object):
             '': '',
         }
 
-    def build_extra_vars_file(self, vars, **kwargs):
-        handle, path = tempfile.mkstemp(dir=kwargs.get('private_data_dir', None))
+    def build_extra_vars_file(self, instance, private_data_dir, passwords):
+        '''
+        Build ansible yaml file filled with extra vars to be passed via -e@file.yml
+        '''
+
+    def build_params_process_isolation(self, instance, private_data_dir, cwd):
+        '''
+        Build ansible runner .run() parameters for process isolation.
+        '''
+        process_isolation_params = dict()
+        if self.should_use_proot(instance):
+            process_isolation_params = {
+                'process_isolation': True,
+                'process_isolation_path': settings.AWX_PROOT_BASE_PATH,
+                'process_isolation_show_paths': self.proot_show_paths + [private_data_dir, cwd] + settings.AWX_PROOT_SHOW_PATHS,
+                'process_isolation_hide_paths': [
+                    settings.AWX_PROOT_BASE_PATH,
+                    '/etc/tower',
+                    '/etc/ssh',
+                    '/var/lib/awx',
+                    '/var/log',
+                    settings.PROJECTS_ROOT,
+                    settings.JOBOUTPUT_ROOT,
+                ] + getattr(settings, 'AWX_PROOT_HIDE_PATHS', None) or [],
+                'process_isolation_ro_paths': [settings.ANSIBLE_VENV_PATH, settings.AWX_VENV_PATH],
+            }
+            if getattr(instance, 'ansible_virtualenv_path', settings.ANSIBLE_VENV_PATH) != settings.ANSIBLE_VENV_PATH:
+                process_isolation_params['process_isolation_ro_paths'].append(instance.ansible_virtualenv_path)
+        return process_isolation_params
+
+    def _write_extra_vars_file(self, private_data_dir, vars, safe_dict={}):
+        env_path = os.path.join(private_data_dir, 'env')
+        try:
+            os.mkdir(env_path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
+
+        path = os.path.join(env_path, 'extravars')
+        handle = os.open(path, os.O_RDWR | os.O_CREAT, stat.S_IREAD | stat.S_IWRITE)
         f = os.fdopen(handle, 'w')
         if settings.ALLOW_JINJA_IN_EXTRA_VARS == 'always':
             f.write(yaml.safe_dump(vars))
         else:
-            f.write(safe_dump(vars, kwargs.get('safe_dict', {}) or None))
+            f.write(safe_dump(vars, safe_dict))
         f.close()
         os.chmod(path, stat.S_IRUSR)
         return path
 
-    def add_ansible_venv(self, venv_path, env, add_awx_lib=True, **kwargs):
+    def add_ansible_venv(self, venv_path, env, isolated=False):
         env['VIRTUAL_ENV'] = venv_path
         env['PATH'] = os.path.join(venv_path, "bin") + ":" + env['PATH']
         venv_libdir = os.path.join(venv_path, "lib")
 
-        if not kwargs.get('isolated', False) and not os.path.exists(venv_libdir):
-            raise RuntimeError(
-                'a valid Python virtualenv does not exist at {}'.format(venv_path)
-            )
-        env.pop('PYTHONPATH', None)  # default to none if no python_ver matches
-        for version in os.listdir(venv_libdir):
-            if fnmatch.fnmatch(version, 'python[23].*'):
-                if os.path.isdir(os.path.join(venv_libdir, version)):
-                    env['PYTHONPATH'] = os.path.join(venv_libdir, version, "site-packages") + ":"
-                    break
-        # Add awx/lib to PYTHONPATH.
-        if add_awx_lib:
-            env['PYTHONPATH'] = env.get('PYTHONPATH', '') + self.get_path_to('..', 'lib') + ':'
-        return env
+        if not isolated and (
+            not os.path.exists(venv_libdir) or
+            os.path.join(venv_path, '') not in get_custom_venv_choices()
+        ):
+            raise InvalidVirtualenvError(_(
+                'Invalid virtual environment selected: {}'.format(venv_path)
+            ))
+
+        isolated_manager.set_pythonpath(venv_libdir, env)
 
     def add_awx_venv(self, env):
         env['VIRTUAL_ENV'] = settings.AWX_VENV_PATH
         env['PATH'] = os.path.join(settings.AWX_VENV_PATH, "bin") + ":" + env['PATH']
-        return env
 
-    def build_env(self, instance, **kwargs):
+    def build_env(self, instance, private_data_dir, isolated, private_data_files=None):
         '''
         Build environment dictionary for ansible-playbook.
         '''
@@ -836,45 +931,58 @@ class BaseTask(object):
         # Update PYTHONPATH to use local site-packages.
         # NOTE:
         # Derived class should call add_ansible_venv() or add_awx_venv()
-        if self.should_use_proot(instance, **kwargs):
+        if self.should_use_proot(instance):
             env['PROOT_TMP_DIR'] = settings.AWX_PROOT_BASE_PATH
-        env['AWX_PRIVATE_DATA_DIR'] = kwargs['private_data_dir']
+        env['AWX_PRIVATE_DATA_DIR'] = private_data_dir
         return env
 
-    def should_use_proot(self, instance, **kwargs):
+    def should_use_proot(self, instance):
         '''
         Return whether this task should use proot.
         '''
         return False
 
-    def build_inventory(self, instance, **kwargs):
+    def build_inventory(self, instance, private_data_dir):
         script_params = dict(hostvars=True)
         if hasattr(instance, 'job_slice_number'):
             script_params['slice_number'] = instance.job_slice_number
             script_params['slice_count'] = instance.job_slice_count
         script_data = instance.inventory.get_script_data(**script_params)
         json_data = json.dumps(script_data)
-        handle, path = tempfile.mkstemp(dir=kwargs.get('private_data_dir', None))
+        handle, path = tempfile.mkstemp(dir=private_data_dir)
         f = os.fdopen(handle, 'w')
         f.write('#! /usr/bin/env python\n# -*- coding: utf-8 -*-\nprint(%r)\n' % json_data)
         f.close()
         os.chmod(path, stat.S_IRUSR | stat.S_IXUSR | stat.S_IWUSR)
         return path
 
-    def build_args(self, instance, **kwargs):
+    def build_args(self, instance, private_data_dir, passwords):
         raise NotImplementedError
 
-    def build_safe_args(self, instance, **kwargs):
-        return self.build_args(instance, **kwargs)
+    def write_args_file(self, private_data_dir, args):
+        env_path = os.path.join(private_data_dir, 'env')
+        try:
+            os.mkdir(env_path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+        except OSError as e:
+            if e.errno != errno.EEXIST:
+                raise
 
-    def build_cwd(self, instance, **kwargs):
+        path = os.path.join(env_path, 'cmdline')
+        handle = os.open(path, os.O_RDWR | os.O_CREAT, stat.S_IREAD | stat.S_IWRITE)
+        f = os.fdopen(handle, 'w')
+        f.write(ansible_runner.utils.args2cmdline(*args))
+        f.close()
+        os.chmod(path, stat.S_IRUSR)
+        return path
+
+    def build_cwd(self, instance, private_data_dir):
         raise NotImplementedError
 
-    def build_output_replacements(self, instance, **kwargs):
+    def build_output_replacements(self, instance, passwords={}):
         return []
 
-    def get_idle_timeout(self):
-        return None
+    def build_credentials_list(self, instance):
+        return []
 
     def get_instance_timeout(self, instance):
         global_timeout_setting_name = instance._global_timeout_setting()
@@ -887,7 +995,7 @@ class BaseTask(object):
             job_timeout = 0
         return job_timeout
 
-    def get_password_prompts(self, **kwargs):
+    def get_password_prompts(self, passwords={}):
         '''
         Return a dictionary where keys are strings or regular expressions for
         prompts, and values are password lookup keys (keys that are returned
@@ -895,227 +1003,306 @@ class BaseTask(object):
         '''
         return OrderedDict()
 
-    def get_stdout_handle(self, instance):
-        '''
-        Return an virtual file object for capturing stdout and/or events.
-        '''
-        dispatcher = CallbackQueueDispatcher()
+    def create_expect_passwords_data_struct(self, password_prompts, passwords):
+        expect_passwords = {}
+        for k, v in password_prompts.items():
+            expect_passwords[k] = passwords.get(v, '') or ''
+        return expect_passwords
 
-        if isinstance(instance, (Job, AdHocCommand, ProjectUpdate)):
-            def event_callback(event_data):
-                event_data.setdefault(self.event_data_key, instance.id)
-                if 'uuid' in event_data:
-                    cache_event = cache.get('ev-{}'.format(event_data['uuid']), None)
-                    if cache_event is not None:
-                        event_data.update(json.loads(cache_event))
-                dispatcher.dispatch(event_data)
-
-            return OutputEventFilter(event_callback)
-        else:
-            def event_callback(event_data):
-                event_data.setdefault(self.event_data_key, instance.id)
-                dispatcher.dispatch(event_data)
-
-            return OutputVerboseFilter(event_callback)
-
-    def pre_run_hook(self, instance, **kwargs):
+    def pre_run_hook(self, instance):
         '''
         Hook for any steps to run before the job/task starts
         '''
 
-    def post_run_hook(self, instance, status, **kwargs):
+    def post_run_hook(self, instance, status):
         '''
         Hook for any steps to run before job/task is marked as complete.
         '''
 
-    def final_run_hook(self, instance, status, **kwargs):
+    def final_run_hook(self, instance, status, private_data_dir, fact_modification_times, isolated_manager_instance=None):
         '''
         Hook for any steps to run after job/task is marked as complete.
         '''
+
+    def event_handler(self, event_data):
+        #
+        # ⚠️  D-D-D-DANGER ZONE ⚠️
+        # This method is called once for *every event* emitted by Ansible
+        # Runner as a playbook runs.  That means that changes to the code in
+        # this method are _very_ likely to introduce performance regressions.
+        #
+        # Even if this function is made on average .05s slower, it can have
+        # devastating performance implications for playbooks that emit
+        # tens or hundreds of thousands of events.
+        #
+        # Proceed with caution!
+        #
+        '''
+        Ansible runner puts a parent_uuid on each event, no matter what the type.
+        AWX only saves the parent_uuid if the event is for a Job.
+        '''
+        if event_data.get(self.event_data_key, None):
+            if self.event_data_key != 'job_id':
+                event_data.pop('parent_uuid', None)
+        should_write_event = False
+        event_data.setdefault(self.event_data_key, self.instance.id)
+        self.dispatcher.dispatch(event_data)
+        self.event_ct += 1
+
+        '''
+        Handle artifacts
+        '''
+        if event_data.get('event_data', {}).get('artifact_data', {}):
+            self.instance.artifacts = event_data['event_data']['artifact_data']
+            self.instance.save(update_fields=['artifacts'])
+
+        return should_write_event
+
+    def cancel_callback(self):
+        '''
+        Ansible runner callback to tell the job when/if it is canceled
+        '''
+        self.instance = self.update_model(self.instance.pk)
+        if self.instance.cancel_flag or self.instance.status == 'canceled':
+            cancel_wait = (now() - self.instance.modified).seconds if self.instance.modified else 0
+            if cancel_wait > 5:
+                logger.warn('Request to cancel {} took {} seconds to complete.'.format(self.instance.log_format, cancel_wait))
+            return True
+        return False
+
+    def finished_callback(self, runner_obj):
+        '''
+        Ansible runner callback triggered on finished run
+        '''
+        event_data = {
+            'event': 'EOF',
+            'final_counter': self.event_ct,
+        }
+        event_data.setdefault(self.event_data_key, self.instance.id)
+        self.dispatcher.dispatch(event_data)
+
+    def status_handler(self, status_data, runner_config):
+        '''
+        Ansible runner callback triggered on status transition
+        '''
+        if status_data['status'] == 'starting':
+            job_env = dict(runner_config.env)
+            '''
+            Take the safe environment variables and overwrite 
+            '''
+            for k, v in self.safe_env.items():
+                if k in job_env:
+                    job_env[k] = v
+            self.instance = self.update_model(self.instance.pk, job_args=json.dumps(runner_config.command),
+                                              job_cwd=runner_config.cwd, job_env=job_env)
+
+    def check_handler(self, config):
+        '''
+        IsolatedManager callback triggered by the repeated checks of the isolated node
+        '''
+        job_env = build_safe_env(config['env'])
+        for k, v in self.safe_cred_env.items():
+            if k in job_env:
+                job_env[k] = v
+        self.instance = self.update_model(self.instance.pk,
+                                          job_args=json.dumps(config['command']),
+                                          job_cwd=config['cwd'],
+                                          job_env=job_env)
+
 
     @with_path_cleanup
     def run(self, pk, **kwargs):
         '''
         Run the job/task and capture its output.
         '''
-        instance = self.update_model(pk, status='running',
-                                     start_args='')  # blank field to remove encrypted passwords
+        # self.instance because of the update_model pattern and when it's used in callback handlers
+        self.instance = self.update_model(pk, status='running',
+                                          start_args='')  # blank field to remove encrypted passwords
 
-        instance.websocket_emit_status("running")
-        status, rc, tb = 'error', None, ''
+        self.instance.websocket_emit_status("running")
+        status, rc = 'error', None
         output_replacements = []
         extra_update_fields = {}
-        event_ct = 0
-        stdout_handle = None
+        fact_modification_times = {}
+        self.event_ct = 0
+
+        '''
+        Needs to be an object property because status_handler uses it in a callback context
+        '''
+        self.safe_env = {}
+        self.safe_cred_env = {}
+        private_data_dir = None
+        isolated_manager_instance = None
 
         try:
-            kwargs['isolated'] = instance.is_isolated()
-            self.pre_run_hook(instance, **kwargs)
-            if instance.cancel_flag:
-                instance = self.update_model(instance.pk, status='canceled')
-            if instance.status != 'running':
+            isolated = self.instance.is_isolated()
+            self.pre_run_hook(self.instance)
+            if self.instance.cancel_flag:
+                self.instance = self.update_model(self.instance.pk, status='canceled')
+            if self.instance.status != 'running':
                 # Stop the task chain and prevent starting the job if it has
                 # already been canceled.
-                instance = self.update_model(pk)
-                status = instance.status
-                raise RuntimeError('not starting %s task' % instance.status)
+                self.instance = self.update_model(pk)
+                status = self.instance.status
+                raise RuntimeError('not starting %s task' % self.instance.status)
 
             if not os.path.exists(settings.AWX_PROOT_BASE_PATH):
                 raise RuntimeError('AWX_PROOT_BASE_PATH=%s does not exist' % settings.AWX_PROOT_BASE_PATH)
 
             # store a record of the venv used at runtime
-            if hasattr(instance, 'custom_virtualenv'):
-                self.update_model(pk, custom_virtualenv=getattr(instance, 'ansible_virtualenv_path', settings.ANSIBLE_VENV_PATH))
-
-            # Fetch ansible version once here to support version-dependent features.
-            kwargs['ansible_version'] = get_ansible_version()
-            kwargs['private_data_dir'] = self.build_private_data_dir(instance, **kwargs)
+            if hasattr(self.instance, 'custom_virtualenv'):
+                self.update_model(pk, custom_virtualenv=getattr(self.instance, 'ansible_virtualenv_path', settings.ANSIBLE_VENV_PATH))
+            private_data_dir = self.build_private_data_dir(self.instance)
 
             # Fetch "cached" fact data from prior runs and put on the disk
             # where ansible expects to find it
-            if getattr(instance, 'use_fact_cache', False):
-                instance.start_job_fact_cache(
-                    os.path.join(kwargs['private_data_dir']),
-                    kwargs.setdefault('fact_modification_times', {})
+            if getattr(self.instance, 'use_fact_cache', False):
+                self.instance.start_job_fact_cache(
+                    os.path.join(private_data_dir, 'artifacts', str(self.instance.id), 'fact_cache'),
+                    fact_modification_times,
                 )
 
             # May have to serialize the value
-            kwargs['private_data_files'] = self.build_private_data_files(instance, **kwargs)
-            kwargs['passwords'] = self.build_passwords(instance, **kwargs)
-            kwargs['proot_show_paths'] = self.proot_show_paths
-            if getattr(instance, 'ansible_virtualenv_path', settings.ANSIBLE_VENV_PATH) != settings.ANSIBLE_VENV_PATH:
-                kwargs['proot_custom_virtualenv'] = instance.ansible_virtualenv_path
-            args = self.build_args(instance, **kwargs)
-            safe_args = self.build_safe_args(instance, **kwargs)
-            output_replacements = self.build_output_replacements(instance, **kwargs)
-            cwd = self.build_cwd(instance, **kwargs)
-            env = self.build_env(instance, **kwargs)
-            safe_env = build_safe_env(env)
+            private_data_files = self.build_private_data_files(self.instance, private_data_dir)
+            passwords = self.build_passwords(self.instance, kwargs)
+            self.build_extra_vars_file(self.instance, private_data_dir, passwords)
+            args = self.build_args(self.instance, private_data_dir, passwords)
+            # TODO: output_replacements hurts my head right now
+            #output_replacements = self.build_output_replacements(self.instance, **kwargs)
+            output_replacements = []
+            cwd = self.build_cwd(self.instance, private_data_dir)
+            process_isolation_params = self.build_params_process_isolation(self.instance,
+                                                                           private_data_dir,
+                                                                           cwd)
+            env = self.build_env(self.instance, private_data_dir, isolated,
+                                 private_data_files=private_data_files)
+            self.safe_env = build_safe_env(env)
 
-            # handle custom injectors specified on the CredentialType
-            credentials = []
-            if isinstance(instance, Job):
-                credentials = instance.credentials.all()
-            elif isinstance(instance, InventoryUpdate):
-                # TODO: allow multiple custom creds for inv updates
-                credentials = [instance.get_cloud_credential()]
-            elif isinstance(instance, Project):
-                # once (or if) project updates
-                # move from a .credential -> .credentials model, we can
-                # lose this block
-                credentials = [instance.credential]
+            credentials = self.build_credentials_list(self.instance)
 
             for credential in credentials:
                 if credential:
                     credential.credential_type.inject_credential(
-                        credential, env, safe_env, args, safe_args, kwargs['private_data_dir']
+                        credential, env, self.safe_cred_env, args, private_data_dir
                     )
 
-            if instance.is_isolated() is False:
-                stdout_handle = self.get_stdout_handle(instance)
-            else:
-                stdout_handle = isolated_manager.IsolatedManager.get_stdout_handle(
-                    instance, kwargs['private_data_dir'], event_data_key=self.event_data_key)
-            if self.should_use_proot(instance, **kwargs):
-                if not check_proot_installed():
-                    raise RuntimeError('bubblewrap is not installed')
-                kwargs['proot_temp_dir'] = build_proot_temp_dir()
-                self.cleanup_paths.append(kwargs['proot_temp_dir'])
-                args = wrap_args_with_proot(args, cwd, **kwargs)
-                safe_args = wrap_args_with_proot(safe_args, cwd, **kwargs)
-            # If there is an SSH key path defined, wrap args with ssh-agent.
-            ssh_key_path = self.get_ssh_key_path(instance, **kwargs)
-            # If we're executing on an isolated host, don't bother adding the
-            # key to the agent in this environment
-            if ssh_key_path and instance.is_isolated() is False:
-                ssh_auth_sock = os.path.join(kwargs['private_data_dir'], 'ssh_auth.sock')
-                args = run.wrap_args_with_ssh_agent(args, ssh_key_path, ssh_auth_sock)
-                safe_args = run.wrap_args_with_ssh_agent(safe_args, ssh_key_path, ssh_auth_sock)
-            instance = self.update_model(pk, job_args=json.dumps(safe_args),
-                                         job_cwd=cwd, job_env=safe_env)
+            self.safe_env.update(self.safe_cred_env)
 
-            expect_passwords = {}
-            for k, v in self.get_password_prompts(**kwargs).items():
-                expect_passwords[k] = kwargs['passwords'].get(v, '') or ''
-            _kw = dict(
-                expect_passwords=expect_passwords,
-                cancelled_callback=lambda: self.update_model(instance.pk).cancel_flag,
-                job_timeout=self.get_instance_timeout(instance),
-                idle_timeout=self.get_idle_timeout(),
-                extra_update_fields=extra_update_fields,
-                pexpect_timeout=getattr(settings, 'PEXPECT_TIMEOUT', 5),
-                proot_cmd=getattr(settings, 'AWX_PROOT_CMD', 'bwrap'),
-            )
-            instance = self.update_model(instance.pk, output_replacements=output_replacements)
-            if instance.is_isolated() is True:
-                manager_instance = isolated_manager.IsolatedManager(
-                    args, cwd, env, stdout_handle, ssh_key_path, **_kw
-                )
-                status, rc = manager_instance.run(instance,
-                                                  kwargs['private_data_dir'],
-                                                  kwargs.get('proot_temp_dir'))
-            else:
-                status, rc = run.run_pexpect(
-                    args, cwd, env, stdout_handle, **_kw
-                )
+            self.write_args_file(private_data_dir, args)
 
+            password_prompts = self.get_password_prompts(passwords)
+            expect_passwords = self.create_expect_passwords_data_struct(password_prompts, passwords)
+
+            self.instance = self.update_model(self.instance.pk, output_replacements=output_replacements)
+
+            params = {
+                'ident': self.instance.id,
+                'private_data_dir': private_data_dir,
+                'project_dir': cwd,
+                'playbook': self.build_playbook_path_relative_to_cwd(self.instance, private_data_dir),
+                'inventory': self.build_inventory(self.instance, private_data_dir),
+                'passwords': expect_passwords,
+                'envvars': env,
+                'event_handler': self.event_handler,
+                'cancel_callback': self.cancel_callback,
+                'finished_callback': self.finished_callback,
+                'status_handler': self.status_handler,
+                'settings': {
+                    'job_timeout': self.get_instance_timeout(self.instance),
+                    'pexpect_timeout': getattr(settings, 'PEXPECT_TIMEOUT', 5),
+                    'suppress_ansible_output': True,
+                    **process_isolation_params,
+                },
+            }
+
+            if isinstance(self.instance, AdHocCommand):
+                params['module'] = self.build_module_name(self.instance)
+                params['module_args'] = self.build_module_args(self.instance)
+
+            if getattr(self.instance, 'use_fact_cache', False):
+                # Enable Ansible fact cache.
+                params['fact_cache_type'] = 'jsonfile'
+            else:
+                # Disable Ansible fact cache.
+                params['fact_cache_type'] = ''
+
+            '''
+            Delete parameters if the values are None or empty array
+            '''
+            for v in ['passwords', 'playbook', 'inventory']:
+                if not params[v]:
+                    del params[v]
+
+            if self.instance.is_isolated() is True:
+                module_args = None
+                if 'module_args' in params:
+                    # if it's adhoc, copy the module args
+                    module_args = ansible_runner.utils.args2cmdline(
+                        params.get('module_args'),
+                    )
+                else:
+                    # otherwise, it's a playbook, so copy the project dir
+                    copy_tree(cwd, os.path.join(private_data_dir, 'project'))
+                shutil.move(
+                    params.pop('inventory'),
+                    os.path.join(private_data_dir, 'inventory')
+                )
+                ansible_runner.utils.dump_artifacts(params)
+                isolated_manager_instance = isolated_manager.IsolatedManager(
+                    cancelled_callback=lambda: self.update_model(self.instance.pk).cancel_flag,
+                    check_callback=self.check_handler,
+                )
+                status, rc = isolated_manager_instance.run(self.instance,
+                                                           private_data_dir,
+                                                           params.get('playbook'),
+                                                           params.get('module'),
+                                                           module_args,
+                                                           event_data_key=self.event_data_key,
+                                                           ident=str(self.instance.pk))
+                self.event_ct = len(isolated_manager_instance.handled_events)
+            else:
+                self.dispatcher = CallbackQueueDispatcher()
+                res = ansible_runner.interface.run(**params)
+                status = res.status
+                rc = res.rc
+
+            if status == 'timeout':
+                self.instance.job_explanation = "Job terminated due to timeout"
+                status = 'failed'
+                extra_update_fields['job_explanation'] = self.instance.job_explanation
+
+        except InvalidVirtualenvError as e:
+            extra_update_fields['job_explanation'] = e.message
+            logger.error('{} {}'.format(self.instance.log_format, e.message))
         except Exception:
-            # run_pexpect does not throw exceptions for cancel or timeout
             # this could catch programming or file system errors
-            tb = traceback.format_exc()
-            logger.exception('%s Exception occurred while running task', instance.log_format)
+            extra_update_fields['result_traceback'] = traceback.format_exc()
+            logger.exception('%s Exception occurred while running task', self.instance.log_format)
         finally:
-            try:
-                if stdout_handle:
-                    stdout_handle.flush()
-                    stdout_handle.close()
-                    event_ct = getattr(stdout_handle, '_counter', 0)
-                logger.info('%s finished running, producing %s events.',
-                            instance.log_format, event_ct)
-            except Exception:
-                logger.exception('Error flushing job stdout and saving event count.')
+            logger.info('%s finished running, producing %s events.', self.instance.log_format, self.event_ct)
 
         try:
-            self.post_run_hook(instance, status, **kwargs)
+            self.post_run_hook(self.instance, status)
         except Exception:
-            logger.exception('{} Post run hook errored.'.format(instance.log_format))
-        instance = self.update_model(pk)
-        if instance.cancel_flag:
-            status = 'canceled'
-            cancel_wait = (now() - instance.modified).seconds if instance.modified else 0
-            if cancel_wait > 5:
-                logger.warn('Request to cancel {} took {} seconds to complete.'.format(instance.log_format, cancel_wait))
+            logger.exception('{} Post run hook errored.'.format(self.instance.log_format))
 
-        instance = self.update_model(pk, status=status, result_traceback=tb,
-                                     output_replacements=output_replacements,
-                                     emitted_events=event_ct,
-                                     **extra_update_fields)
+        self.instance = self.update_model(pk)
+        self.instance = self.update_model(pk, status=status,
+                                          output_replacements=output_replacements,
+                                          emitted_events=self.event_ct,
+                                          **extra_update_fields)
+
         try:
-            self.final_run_hook(instance, status, **kwargs)
+            self.final_run_hook(self.instance, status, private_data_dir, fact_modification_times, isolated_manager_instance=isolated_manager_instance)
         except Exception:
-            logger.exception('{} Final run hook errored.'.format(instance.log_format))
-        instance.websocket_emit_status(status)
+            logger.exception('{} Final run hook errored.'.format(self.instance.log_format))
+
+        self.instance.websocket_emit_status(status)
         if status != 'successful':
             if status == 'canceled':
-                raise AwxTaskError.TaskCancel(instance, rc)
+                raise AwxTaskError.TaskCancel(self.instance, rc)
             else:
-                raise AwxTaskError.TaskError(instance, rc)
-
-    def get_ssh_key_path(self, instance, **kwargs):
-        '''
-        If using an SSH key, return the path for use by ssh-agent.
-        '''
-        private_data_files = kwargs.get('private_data_files', {})
-        if 'ssh' in private_data_files.get('credentials', {}):
-            return private_data_files['credentials']['ssh']
-        '''
-        Note: Don't inject network ssh key data into ssh-agent for network
-        credentials because the ansible modules do not yet support it.
-        We will want to add back in support when/if Ansible network modules
-        support this.
-        '''
-
-        return ''
+                raise AwxTaskError.TaskError(self.instance, rc)
 
 
 @task()
@@ -1128,55 +1315,43 @@ class RunJob(BaseTask):
     event_model = JobEvent
     event_data_key = 'job_id'
 
-    def build_private_data(self, job, **kwargs):
+    def build_private_data(self, job, private_data_dir):
         '''
         Returns a dict of the form
         {
             'credentials': {
                 <awx.main.models.Credential>: <credential_decrypted_ssh_key_data>,
                 <awx.main.models.Credential>: <credential_decrypted_ssh_key_data>,
-                <awx.main.models.Credential>: <credential_decrypted_ssh_key_data>
+                ...
+            },
+            'certificates': {
+                <awx.main.models.Credential>: <signed SSH certificate data>,
+                <awx.main.models.Credential>: <signed SSH certificate data>,
+                ...
             }
         }
         '''
         private_data = {'credentials': {}}
-        for credential in job.credentials.all():
+        for credential in job.credentials.prefetch_related('input_sources__source_credential').all():
             # If we were sent SSH credentials, decrypt them and send them
             # back (they will be written to a temporary file).
             if credential.has_input('ssh_key_data'):
                 private_data['credentials'][credential] = credential.get_input('ssh_key_data', default='')
-
-            if credential.kind == 'openstack':
-                openstack_auth = dict(auth_url=credential.get_input('host', default=''),
-                                      username=credential.get_input('username', default=''),
-                                      password=credential.get_input('password', default=''),
-                                      project_name=credential.get_input('project', default=''))
-                if credential.has_input('domain'):
-                    openstack_auth['domain_name'] = credential.get_input('domain', default='')
-                openstack_data = {
-                    'clouds': {
-                        'devstack': {
-                            'auth': openstack_auth,
-                        },
-                    },
-                }
-                private_data['credentials'][credential] = yaml.safe_dump(openstack_data, default_flow_style=False, allow_unicode=True)
+            if credential.has_input('ssh_public_key_data'):
+                private_data.setdefault('certificates', {})[credential] = credential.get_input('ssh_public_key_data', default='')
 
         return private_data
 
-    def build_passwords(self, job, **kwargs):
+    def build_passwords(self, job, runtime_passwords):
         '''
         Build a dictionary of passwords for SSH private key, SSH user, sudo/su
         and ansible-vault.
         '''
-        passwords = super(RunJob, self).build_passwords(job, **kwargs)
+        passwords = super(RunJob, self).build_passwords(job, runtime_passwords)
         cred = job.get_deprecated_credential('ssh')
         if cred:
-            for field in ('ssh_key_unlock', 'ssh_password', 'become_password'):
-                value = kwargs.get(
-                    field,
-                    cred.get_input('password' if field == 'ssh_password' else field, default='')
-                )
+            for field in ('ssh_key_unlock', 'ssh_password', 'become_password', 'vault_password'):
+                value = runtime_passwords.get(field, cred.get_input('password' if field == 'ssh_password' else field, default=''))
                 if value not in ('', 'ASK'):
                     passwords[field] = value
 
@@ -1191,11 +1366,7 @@ class RunJob(BaseTask):
                             vault_id
                         )
                     )
-
-            value = kwargs.get(field, None)
-            if value is None:
-                value = cred.get_input('vault_password', default='')
-
+            value = runtime_passwords.get(field, cred.get_input('vault_password', default=''))
             if value not in ('', 'ASK'):
                 passwords[field] = value
 
@@ -1205,16 +1376,18 @@ class RunJob(BaseTask):
         '''
         if 'ssh_key_unlock' not in passwords:
             for cred in job.network_credentials:
-                if cred.has_input('ssh_key_unlock'):
-                    passwords['ssh_key_unlock'] = kwargs.get(
-                        'ssh_key_unlock',
-                        cred.get_input('ssh_key_unlock', default='')
-                    )
+                if cred.inputs.get('ssh_key_unlock'):
+                    passwords['ssh_key_unlock'] = runtime_passwords.get('ssh_key_unlock', cred.get_input('ssh_key_unlock', default=''))
                     break
 
         return passwords
 
-    def build_env(self, job, **kwargs):
+    def add_ansible_venv(self, venv_path, env, isolated=False):
+        super(RunJob, self).add_ansible_venv(venv_path, env, isolated=isolated)
+        # Add awx/lib to PYTHONPATH.
+        env['PYTHONPATH'] = env.get('PYTHONPATH', '') + self.get_path_to('..', 'lib') + ':'
+
+    def build_env(self, job, private_data_dir, isolated=False, private_data_files=None):
         '''
         Build environment dictionary for ansible-playbook.
         '''
@@ -1224,8 +1397,12 @@ class RunJob(BaseTask):
                 settings.AWX_ANSIBLE_CALLBACK_PLUGINS:
             plugin_dirs.extend(settings.AWX_ANSIBLE_CALLBACK_PLUGINS)
         plugin_path = ':'.join(plugin_dirs)
-        env = super(RunJob, self).build_env(job, **kwargs)
-        env = self.add_ansible_venv(job.ansible_virtualenv_path, env, add_awx_lib=kwargs.get('isolated', False), **kwargs)
+        env = super(RunJob, self).build_env(job, private_data_dir,
+                                            isolated=isolated,
+                                            private_data_files=private_data_files)
+        if private_data_files is None:
+            private_data_files = {}
+        self.add_ansible_venv(job.ansible_virtualenv_path, env, isolated=isolated)
         # Set environment variables needed for inventory and job event
         # callbacks to work.
         env['JOB_ID'] = str(job.pk)
@@ -1238,30 +1415,23 @@ class RunJob(BaseTask):
                     self.get_path_to('..', 'plugins', 'library')
                 ])
             )
-            env['ANSIBLE_CACHE_PLUGIN'] = "jsonfile"
-            env['ANSIBLE_CACHE_PLUGIN_CONNECTION'] = os.path.join(kwargs['private_data_dir'], 'facts')
         if job.project:
             env['PROJECT_REVISION'] = job.project.scm_revision
         env['ANSIBLE_RETRY_FILES_ENABLED'] = "False"
         env['MAX_EVENT_RES'] = str(settings.MAX_EVENT_RES_DATA)
-        if not kwargs.get('isolated'):
+        if not isolated:
             env['ANSIBLE_CALLBACK_PLUGINS'] = plugin_path
-            env['ANSIBLE_STDOUT_CALLBACK'] = 'awx_display'
             env['AWX_HOST'] = settings.TOWER_URL_BASE
-        env['CACHE'] = settings.CACHES['default']['LOCATION'] if 'LOCATION' in settings.CACHES['default'] else ''
 
         # Create a directory for ControlPath sockets that is unique to each
         # job and visible inside the proot environment (when enabled).
-        cp_dir = os.path.join(kwargs['private_data_dir'], 'cp')
+        cp_dir = os.path.join(private_data_dir, 'cp')
         if not os.path.exists(cp_dir):
             os.mkdir(cp_dir, 0o700)
         env['ANSIBLE_SSH_CONTROL_PATH_DIR'] = cp_dir
 
         # Set environment variables for cloud credentials.
-        cred_files = kwargs.get('private_data_files', {}).get('credentials', {})
-        for cloud_cred in job.cloud_credentials:
-            if cloud_cred and cloud_cred.kind == 'openstack':
-                env['OS_CLIENT_CONFIG_FILE'] = cred_files.get(cloud_cred, '')
+        cred_files = private_data_files.get('credentials', {})
 
         for network_cred in job.network_credentials:
             env['ANSIBLE_NET_USERNAME'] = network_cred.get_input('username', default='')
@@ -1278,7 +1448,7 @@ class RunJob(BaseTask):
 
         return env
 
-    def build_args(self, job, **kwargs):
+    def build_args(self, job, private_data_dir, passwords):
         '''
         Build command line argument list for running ansible-playbook,
         optionally using ssh-agent for public/private key authentication.
@@ -1287,9 +1457,9 @@ class RunJob(BaseTask):
 
         ssh_username, become_username, become_method = '', '', ''
         if creds:
-            ssh_username = kwargs.get('username', creds.get_input('username', default=''))
-            become_method = kwargs.get('become_method', creds.get_input('become_method', default=''))
-            become_username = kwargs.get('become_username', creds.get_input('become_username', default=''))
+            ssh_username = creds.get_input('username', default='')
+            become_method = creds.get_input('become_method', default='')
+            become_username = creds.get_input('become_username', default='')
         else:
             become_method = None
             become_username = ""
@@ -1298,15 +1468,11 @@ class RunJob(BaseTask):
         # it doesn't make sense to rely on ansible-playbook's default of using
         # the current user.
         ssh_username = ssh_username or 'root'
-        args = [
-            self.get_path_to_ansible(job, 'ansible-playbook', **kwargs),
-            '-i',
-            self.build_inventory(job, **kwargs)
-        ]
+        args = []
         if job.job_type == 'check':
             args.append('--check')
         args.extend(['-u', sanitize_jinja(ssh_username)])
-        if 'ssh_password' in kwargs.get('passwords', {}):
+        if 'ssh_password' in passwords:
             args.append('--ask-pass')
         if job.become_enabled:
             args.append('--become')
@@ -1316,11 +1482,11 @@ class RunJob(BaseTask):
             args.extend(['--become-method', sanitize_jinja(become_method)])
         if become_username:
             args.extend(['--become-user', sanitize_jinja(become_username)])
-        if 'become_password' in kwargs.get('passwords', {}):
+        if 'become_password' in passwords:
             args.append('--ask-become-pass')
 
         # Support prompting for multiple vault passwords
-        for k, v in kwargs.get('passwords', {}).items():
+        for k, v in passwords.items():
             if k.startswith('vault_password'):
                 if k == 'vault_password':
                     args.append('--ask-vault-pass')
@@ -1344,14 +1510,25 @@ class RunJob(BaseTask):
         if job.start_at_task:
             args.append('--start-at-task=%s' % job.start_at_task)
 
+        return args
+
+    def build_cwd(self, job, private_data_dir):
+        cwd = job.project.get_project_path()
+        if not cwd:
+            root = settings.PROJECTS_ROOT
+            raise RuntimeError('project local_path %s cannot be found in %s' %
+                               (job.project.local_path, root))
+        return cwd
+
+    def build_playbook_path_relative_to_cwd(self, job, private_data_dir):
+        return os.path.join(job.playbook)
+
+    def build_extra_vars_file(self, job, private_data_dir, passwords):
         # Define special extra_vars for AWX, combine with job.extra_vars.
         extra_vars = job.awx_meta_vars()
 
         if job.extra_vars_dict:
-            if kwargs.get('display', False) and job.job_template:
-                extra_vars.update(json.loads(job.display_extra_vars()))
-            else:
-                extra_vars.update(json.loads(job.decrypted_extra_vars()))
+            extra_vars.update(json.loads(job.decrypted_extra_vars()))
 
         # By default, all extra vars disallow Jinja2 template usage for
         # security reasons; top level key-values defined in JT.extra_vars, however,
@@ -1361,55 +1538,36 @@ class RunJob(BaseTask):
         safe_dict = {}
         if job.job_template and settings.ALLOW_JINJA_IN_EXTRA_VARS == 'template':
             safe_dict = job.job_template.extra_vars_dict
-        extra_vars_path = self.build_extra_vars_file(
-            vars=extra_vars,
-            safe_dict=safe_dict,
-            **kwargs
-        )
-        args.extend(['-e', '@%s' % (extra_vars_path)])
 
-        # Add path to playbook (relative to project.local_path).
-        args.append(job.playbook)
-        return args
+        return self._write_extra_vars_file(private_data_dir, extra_vars, safe_dict)
 
-    def build_safe_args(self, job, **kwargs):
-        return self.build_args(job, display=True, **kwargs)
+    def build_credentials_list(self, job):
+        return job.credentials.prefetch_related('input_sources__source_credential').all()
 
-    def build_cwd(self, job, **kwargs):
-        cwd = job.project.get_project_path()
-        if not cwd:
-            root = settings.PROJECTS_ROOT
-            raise RuntimeError('project local_path %s cannot be found in %s' %
-                               (job.project.local_path, root))
-        return cwd
-
-    def get_idle_timeout(self):
-        return getattr(settings, 'JOB_RUN_IDLE_TIMEOUT', None)
-
-    def get_password_prompts(self, **kwargs):
-        d = super(RunJob, self).get_password_prompts(**kwargs)
-        d[re.compile(r'Enter passphrase for .*:\s*?$', re.M)] = 'ssh_key_unlock'
-        d[re.compile(r'Bad passphrase, try again for .*:\s*?$', re.M)] = ''
+    def get_password_prompts(self, passwords={}):
+        d = super(RunJob, self).get_password_prompts(passwords)
+        d[r'Enter passphrase for .*:\s*?$'] = 'ssh_key_unlock'
+        d[r'Bad passphrase, try again for .*:\s*?$'] = ''
         for method in PRIVILEGE_ESCALATION_METHODS:
-            d[re.compile(r'%s password.*:\s*?$' % (method[0]), re.M)] = 'become_password'
-            d[re.compile(r'%s password.*:\s*?$' % (method[0].upper()), re.M)] = 'become_password'
-        d[re.compile(r'BECOME password.*:\s*?$', re.M)] = 'become_password'
-        d[re.compile(r'SSH password:\s*?$', re.M)] = 'ssh_password'
-        d[re.compile(r'Password:\s*?$', re.M)] = 'ssh_password'
-        d[re.compile(r'Vault password:\s*?$', re.M)] = 'vault_password'
-        for k, v in kwargs.get('passwords', {}).items():
+            d[r'%s password.*:\s*?$' % (method[0])] = 'become_password'
+            d[r'%s password.*:\s*?$' % (method[0].upper())] = 'become_password'
+        d[r'BECOME password.*:\s*?$'] = 'become_password'
+        d[r'SSH password:\s*?$'] = 'ssh_password'
+        d[r'Password:\s*?$'] = 'ssh_password'
+        d[r'Vault password:\s*?$'] = 'vault_password'
+        for k, v in passwords.items():
             if k.startswith('vault_password.'):
                 vault_id = k.split('.')[1]
-                d[re.compile(r'Vault password \({}\):\s*?$'.format(vault_id), re.M)] = k
+                d[r'Vault password \({}\):\s*?$'.format(vault_id)] = k
         return d
 
-    def should_use_proot(self, instance, **kwargs):
+    def should_use_proot(self, job):
         '''
         Return whether this task should use proot.
         '''
         return getattr(settings, 'AWX_PROOT_ENABLED', False)
 
-    def pre_run_hook(self, job, **kwargs):
+    def pre_run_hook(self, job):
         if job.inventory is None:
             error = _('Job could not start because it does not have a valid inventory.')
             self.update_model(job.pk, status='failed', job_explanation=error)
@@ -1450,33 +1608,20 @@ class RunJob(BaseTask):
                                                              ('project_update', local_project_sync.name, local_project_sync.id)))
                     raise
 
-    def final_run_hook(self, job, status, **kwargs):
-        super(RunJob, self).final_run_hook(job, status, **kwargs)
-        if 'private_data_dir' not in kwargs:
+    def final_run_hook(self, job, status, private_data_dir, fact_modification_times, isolated_manager_instance=None):
+        super(RunJob, self).final_run_hook(job, status, private_data_dir, fact_modification_times)
+        if not private_data_dir:
             # If there's no private data dir, that means we didn't get into the
             # actual `run()` call; this _usually_ means something failed in
             # the pre_run_hook method
             return
         if job.use_fact_cache:
             job.finish_job_fact_cache(
-                kwargs['private_data_dir'],
-                kwargs['fact_modification_times']
+                os.path.join(private_data_dir, 'artifacts', str(job.id), 'fact_cache'),
+                fact_modification_times,
             )
-
-        # persist artifacts set via `set_stat` (if any)
-        custom_stats_path = os.path.join(kwargs['private_data_dir'], 'artifacts', 'custom')
-        if os.path.exists(custom_stats_path):
-            with open(custom_stats_path, 'r') as f:
-                custom_stat_data = None
-                try:
-                    custom_stat_data = json.load(f)
-                except ValueError:
-                    logger.warning('Could not parse custom `set_fact` data for job {}'.format(job.id))
-
-                if custom_stat_data:
-                    job.artifacts = custom_stat_data
-                    job.save(update_fields=['artifacts'])
-
+        if isolated_manager_instance:
+            isolated_manager_instance.cleanup()
         try:
             inventory = job.inventory
         except Inventory.DoesNotExist:
@@ -1496,7 +1641,7 @@ class RunProjectUpdate(BaseTask):
     def proot_show_paths(self):
         return [settings.PROJECTS_ROOT]
 
-    def build_private_data(self, project_update, **kwargs):
+    def build_private_data(self, project_update, private_data_dir):
         '''
         Return SSH private key data needed for this project update.
 
@@ -1510,7 +1655,8 @@ class RunProjectUpdate(BaseTask):
         }
         '''
         handle, self.revision_path = tempfile.mkstemp(dir=settings.PROJECTS_ROOT)
-        self.cleanup_paths.append(self.revision_path)
+        if settings.AWX_CLEANUP_PATHS:
+            self.cleanup_paths.append(self.revision_path)
         private_data = {'credentials': {}}
         if project_update.credential:
             credential = project_update.credential
@@ -1518,25 +1664,26 @@ class RunProjectUpdate(BaseTask):
                 private_data['credentials'][credential] = credential.get_input('ssh_key_data', default='')
         return private_data
 
-    def build_passwords(self, project_update, **kwargs):
+    def build_passwords(self, project_update, runtime_passwords):
         '''
         Build a dictionary of passwords for SSH private key unlock and SCM
         username/password.
         '''
-        passwords = super(RunProjectUpdate, self).build_passwords(project_update,
-                                                                  **kwargs)
+        passwords = super(RunProjectUpdate, self).build_passwords(project_update, runtime_passwords)
         if project_update.credential:
             passwords['scm_key_unlock'] = project_update.credential.get_input('ssh_key_unlock', default='')
             passwords['scm_username'] = project_update.credential.get_input('username', default='')
             passwords['scm_password'] = project_update.credential.get_input('password', default='')
         return passwords
 
-    def build_env(self, project_update, **kwargs):
+    def build_env(self, project_update, private_data_dir, isolated=False, private_data_files=None):
         '''
         Build environment dictionary for ansible-playbook.
         '''
-        env = super(RunProjectUpdate, self).build_env(project_update, **kwargs)
-        env = self.add_ansible_venv(settings.ANSIBLE_VENV_PATH, env)
+        env = super(RunProjectUpdate, self).build_env(project_update, private_data_dir,
+                                                      isolated=isolated,
+                                                      private_data_files=private_data_files)
+        self.add_ansible_venv(settings.ANSIBLE_VENV_PATH, env)
         env['ANSIBLE_RETRY_FILES_ENABLED'] = str(False)
         env['ANSIBLE_ASK_PASS'] = str(False)
         env['ANSIBLE_BECOME_ASK_PASS'] = str(False)
@@ -1544,13 +1691,11 @@ class RunProjectUpdate(BaseTask):
         # give ansible a hint about the intended tmpdir to work around issues
         # like https://github.com/ansible/ansible/issues/30064
         env['TMP'] = settings.AWX_PROOT_BASE_PATH
-        env['CACHE'] = settings.CACHES['default']['LOCATION'] if 'LOCATION' in settings.CACHES['default'] else ''
         env['PROJECT_UPDATE_ID'] = str(project_update.pk)
         env['ANSIBLE_CALLBACK_PLUGINS'] = self.get_path_to('..', 'plugins', 'callback')
-        env['ANSIBLE_STDOUT_CALLBACK'] = 'awx_display'
         return env
 
-    def _build_scm_url_extra_vars(self, project_update, **kwargs):
+    def _build_scm_url_extra_vars(self, project_update, scm_username='', scm_password=''):
         '''
         Helper method to build SCM url and extra vars with parameters needed
         for authentication.
@@ -1560,11 +1705,9 @@ class RunProjectUpdate(BaseTask):
         scm_url = update_scm_url(scm_type, project_update.scm_url,
                                  check_special_cases=False)
         scm_url_parts = urlparse.urlsplit(scm_url)
-        scm_username = kwargs.get('passwords', {}).get('scm_username', '')
-        scm_password = kwargs.get('passwords', {}).get('scm_password', '')
         # Prefer the username/password in the URL, if provided.
-        scm_username = scm_url_parts.username or scm_username or ''
-        scm_password = scm_url_parts.password or scm_password or ''
+        scm_username = scm_url_parts.username or scm_username
+        scm_password = scm_url_parts.password or scm_password
         if scm_username:
             if scm_type == 'svn':
                 extra_vars['scm_username'] = scm_username
@@ -1588,25 +1731,28 @@ class RunProjectUpdate(BaseTask):
 
         return scm_url, extra_vars
 
-    def build_inventory(self, instance, **kwargs):
+    def build_inventory(self, instance, private_data_dir):
         return 'localhost,'
 
-    def build_args(self, project_update, **kwargs):
+    def build_args(self, project_update, private_data_dir, passwords):
         '''
         Build command line argument list for running ansible-playbook,
         optionally using ssh-agent for public/private key authentication.
         '''
-        args = [
-            self.get_path_to_ansible(project_update, 'ansible-playbook', **kwargs),
-            '-i',
-            self.build_inventory(project_update, **kwargs)
-        ]
+        args = []
         if getattr(settings, 'PROJECT_UPDATE_VVV', False):
             args.append('-vvv')
         else:
             args.append('-v')
-        scm_url, extra_vars = self._build_scm_url_extra_vars(project_update,
-                                                             **kwargs)
+        return args
+
+    def build_extra_vars_file(self, project_update, private_data_dir, passwords):
+        extra_vars = {}
+        scm_url, extra_vars_new = self._build_scm_url_extra_vars(project_update,
+                                                                 passwords.get('scm_username', ''),
+                                                                 passwords.get('scm_password', ''))
+        extra_vars.update(extra_vars_new)
+
         if project_update.project.scm_revision and project_update.job_type == 'run':
             scm_branch = project_update.project.scm_revision
         else:
@@ -1614,6 +1760,8 @@ class RunProjectUpdate(BaseTask):
         extra_vars.update({
             'project_path': project_update.get_project_path(check_if_exists=False),
             'insights_url': settings.INSIGHTS_URL_BASE,
+            'awx_license_type': get_license(show_key=False).get('license_type', 'UNLICENSED'),
+            'awx_version': get_awx_version(),
             'scm_type': project_update.scm_type,
             'scm_url': scm_url,
             'scm_branch': scm_branch,
@@ -1624,41 +1772,25 @@ class RunProjectUpdate(BaseTask):
             'scm_revision': project_update.project.scm_revision,
             'roles_enabled': getattr(settings, 'AWX_ROLES_ENABLED', True)
         })
-        extra_vars_path = self.build_extra_vars_file(vars=extra_vars, **kwargs)
-        args.extend(['-e', '@%s' % (extra_vars_path)])
-        args.append('project_update.yml')
-        return args
+        self._write_extra_vars_file(private_data_dir, extra_vars)
 
-    def build_safe_args(self, project_update, **kwargs):
-        pwdict = dict(kwargs.get('passwords', {}).items())
-        for pw_name, pw_val in list(pwdict.items()):
-            if pw_name in ('', 'yes', 'no', 'scm_username'):
-                continue
-            pwdict[pw_name] = HIDDEN_PASSWORD
-        kwargs['passwords'] = pwdict
-        return self.build_args(project_update, **kwargs)
-
-    def build_cwd(self, project_update, **kwargs):
+    def build_cwd(self, project_update, private_data_dir):
         return self.get_path_to('..', 'playbooks')
 
-    def build_output_replacements(self, project_update, **kwargs):
+    def build_playbook_path_relative_to_cwd(self, project_update, private_data_dir):
+        self.build_cwd(project_update, private_data_dir)
+        return os.path.join('project_update.yml')
+
+    def build_output_replacements(self, project_update, passwords={}):
         '''
         Return search/replace strings to prevent output URLs from showing
         sensitive passwords.
         '''
         output_replacements = []
-        before_url = self._build_scm_url_extra_vars(project_update,
-                                                    **kwargs)[0]
-        scm_username = kwargs.get('passwords', {}).get('scm_username', '')
-        scm_password = kwargs.get('passwords', {}).get('scm_password', '')
-        pwdict = dict(kwargs.get('passwords', {}).items())
-        for pw_name, pw_val in list(pwdict.items()):
-            if pw_name in ('', 'yes', 'no', 'scm_username'):
-                continue
-            pwdict[pw_name] = HIDDEN_PASSWORD
-        kwargs['passwords'] = pwdict
-        after_url = self._build_scm_url_extra_vars(project_update,
-                                                   **kwargs)[0]
+        before_url, before_passwords = self._build_scm_url_extra_vars(project_update, passwords)
+        scm_username = before_passwords.get('scm_username', '')
+        scm_password = before_passwords.get('scm_password', '')
+        after_url = self._build_scm_url_extra_vars(project_update, passwords)[0]
         if after_url != before_url:
             output_replacements.append((before_url, after_url))
         if project_update.scm_type == 'svn' and scm_username and scm_password:
@@ -1676,20 +1808,17 @@ class RunProjectUpdate(BaseTask):
             output_replacements.append((pattern2 % d_before, pattern2 % d_after))
         return output_replacements
 
-    def get_password_prompts(self, **kwargs):
-        d = super(RunProjectUpdate, self).get_password_prompts(**kwargs)
-        d[re.compile(r'Username for.*:\s*?$', re.M)] = 'scm_username'
-        d[re.compile(r'Password for.*:\s*?$', re.M)] = 'scm_password'
-        d[re.compile(r'Password:\s*?$', re.M)] = 'scm_password'
-        d[re.compile(r'\S+?@\S+?\'s\s+?password:\s*?$', re.M)] = 'scm_password'
-        d[re.compile(r'Enter passphrase for .*:\s*?$', re.M)] = 'scm_key_unlock'
-        d[re.compile(r'Bad passphrase, try again for .*:\s*?$', re.M)] = ''
+    def get_password_prompts(self, passwords={}):
+        d = super(RunProjectUpdate, self).get_password_prompts(passwords)
+        d[r'Username for.*:\s*?$'] = 'scm_username'
+        d[r'Password for.*:\s*?$'] = 'scm_password'
+        d['Password:\s*?$'] = 'scm_password' # noqa
+        d[r'\S+?@\S+?\'s\s+?password:\s*?$'] = 'scm_password'
+        d[r'Enter passphrase for .*:\s*?$'] = 'scm_key_unlock'
+        d[r'Bad passphrase, try again for .*:\s*?$'] = ''
         # FIXME: Configure whether we should auto accept host keys?
-        d[re.compile(r'^Are you sure you want to continue connecting \(yes/no\)\?\s*?$', re.M)] = 'yes'
+        d[r'^Are you sure you want to continue connecting \(yes/no\)\?\s*?$'] = 'yes'
         return d
-
-    def get_idle_timeout(self):
-        return getattr(settings, 'PROJECT_UPDATE_IDLE_TIMEOUT', None)
 
     def _update_dependent_inventories(self, project_update, dependent_inventory_sources):
         scm_revision = project_update.project.scm_revision
@@ -1790,13 +1919,13 @@ class RunProjectUpdate(BaseTask):
                 '{} spent {} waiting to acquire lock for local source tree '
                 'for path {}.'.format(instance.log_format, waiting_time, lock_path))
 
-    def pre_run_hook(self, instance, **kwargs):
+    def pre_run_hook(self, instance):
         # re-create root project folder if a natural disaster has destroyed it
         if not os.path.exists(settings.PROJECTS_ROOT):
             os.mkdir(settings.PROJECTS_ROOT)
         self.acquire_lock(instance)
 
-    def post_run_hook(self, instance, status, **kwargs):
+    def post_run_hook(self, instance, status):
         self.release_lock(instance)
         p = instance.project
         if instance.job_type == 'check' and status not in ('failed', 'canceled',):
@@ -1816,7 +1945,7 @@ class RunProjectUpdate(BaseTask):
             if status == 'successful' and instance.launch_type != 'sync':
                 self._update_dependent_inventories(instance, dependent_inventory_sources)
 
-    def should_use_proot(self, instance, **kwargs):
+    def should_use_proot(self, project_update):
         '''
         Return whether this task should use proot.
         '''
@@ -1834,7 +1963,7 @@ class RunInventoryUpdate(BaseTask):
     def proot_show_paths(self):
         return [self.get_path_to('..', 'plugins', 'inventory')]
 
-    def build_private_data(self, inventory_update, **kwargs):
+    def build_private_data(self, inventory_update, private_data_dir):
         """
         Return private data needed for inventory update.
 
@@ -1849,198 +1978,18 @@ class RunInventoryUpdate(BaseTask):
 
         If no private data is needed, return None.
         """
-        private_data = {'credentials': {}}
-        credential = inventory_update.get_cloud_credential()
+        if inventory_update.source in InventorySource.injectors:
+            injector = InventorySource.injectors[inventory_update.source](self.get_ansible_version(inventory_update))
+            return injector.build_private_data(inventory_update, private_data_dir)
 
-        if inventory_update.source == 'openstack':
-            openstack_auth = dict(auth_url=credential.get_input('host', default=''),
-                                  username=credential.get_input('username', default=''),
-                                  password=credential.get_input('password', default=''),
-                                  project_name=credential.get_input('project', default=''))
-            if credential.has_input('domain'):
-                openstack_auth['domain_name'] = credential.get_input('domain', default='')
-
-            private_state = inventory_update.source_vars_dict.get('private', True)
-            # Retrieve cache path from inventory update vars if available,
-            # otherwise create a temporary cache path only for this update.
-            cache = inventory_update.source_vars_dict.get('cache', {})
-            if not isinstance(cache, dict):
-                cache = {}
-            if not cache.get('path', ''):
-                cache_path = tempfile.mkdtemp(prefix='openstack_cache', dir=kwargs.get('private_data_dir', None))
-                cache['path'] = cache_path
-            openstack_data = {
-                'clouds': {
-                    'devstack': {
-                        'private': private_state,
-                        'auth': openstack_auth,
-                    },
-                },
-                'cache': cache,
-            }
-            ansible_variables = {
-                'use_hostnames': True,
-                'expand_hostvars': False,
-                'fail_on_errors': True,
-            }
-            provided_count = 0
-            for var_name in ansible_variables:
-                if var_name in inventory_update.source_vars_dict:
-                    ansible_variables[var_name] = inventory_update.source_vars_dict[var_name]
-                    provided_count += 1
-            if provided_count:
-                openstack_data['ansible'] = ansible_variables
-            private_data['credentials'][credential] = yaml.safe_dump(
-                openstack_data, default_flow_style=False, allow_unicode=True
-            )
-            return private_data
-
-        cp = configparser.RawConfigParser()
-        # Build custom ec2.ini for ec2 inventory script to use.
-        if inventory_update.source == 'ec2':
-            section = 'ec2'
-            cp.add_section(section)
-            ec2_opts = dict(inventory_update.source_vars_dict.items())
-            regions = inventory_update.source_regions or 'all'
-            regions = ','.join([x.strip() for x in regions.split(',')])
-            regions_blacklist = ','.join(settings.EC2_REGIONS_BLACKLIST)
-            ec2_opts['regions'] = regions
-            ec2_opts.setdefault('regions_exclude', regions_blacklist)
-            ec2_opts.setdefault('destination_variable', 'public_dns_name')
-            ec2_opts.setdefault('vpc_destination_variable', 'ip_address')
-            ec2_opts.setdefault('route53', 'False')
-            ec2_opts.setdefault('all_instances', 'True')
-            ec2_opts.setdefault('all_rds_instances', 'False')
-            ec2_opts.setdefault('include_rds_clusters', 'False')
-            ec2_opts.setdefault('rds', 'False')
-            ec2_opts.setdefault('nested_groups', 'True')
-            ec2_opts.setdefault('elasticache', 'False')
-            ec2_opts.setdefault('stack_filters', 'False')
-            if inventory_update.instance_filters:
-                ec2_opts.setdefault('instance_filters', inventory_update.instance_filters)
-            group_by = [x.strip().lower() for x in inventory_update.group_by.split(',') if x.strip()]
-            for choice in inventory_update.get_ec2_group_by_choices():
-                value = bool((group_by and choice[0] in group_by) or (not group_by and choice[0] != 'instance_id'))
-                ec2_opts.setdefault('group_by_%s' % choice[0], str(value))
-            if 'cache_path' not in ec2_opts:
-                cache_path = tempfile.mkdtemp(prefix='ec2_cache', dir=kwargs.get('private_data_dir', None))
-                ec2_opts['cache_path'] = cache_path
-            ec2_opts.setdefault('cache_max_age', '300')
-            for k, v in ec2_opts.items():
-                cp.set(section, k, str(v))
-        # Allow custom options to vmware inventory script.
-        elif inventory_update.source == 'vmware':
-
-            section = 'vmware'
-            cp.add_section(section)
-            cp.set('vmware', 'cache_max_age', '0')
-            cp.set('vmware', 'validate_certs', str(settings.VMWARE_VALIDATE_CERTS))
-            cp.set('vmware', 'username', credential.get_input('username', default=''))
-            cp.set('vmware', 'password', credential.get_input('password', default=''))
-            cp.set('vmware', 'server', credential.get_input('host', default=''))
-
-            vmware_opts = dict(inventory_update.source_vars_dict.items())
-            if inventory_update.instance_filters:
-                vmware_opts.setdefault('host_filters', inventory_update.instance_filters)
-            if inventory_update.group_by:
-                vmware_opts.setdefault('groupby_patterns', inventory_update.group_by)
-
-            for k, v in vmware_opts.items():
-                cp.set(section, k, str(v))
-
-        elif inventory_update.source == 'satellite6':
-            section = 'foreman'
-            cp.add_section(section)
-
-            group_patterns = '[]'
-            group_prefix = 'foreman_'
-            want_hostcollections = 'False'
-            foreman_opts = dict(inventory_update.source_vars_dict.items())
-            foreman_opts.setdefault('ssl_verify', 'False')
-            for k, v in foreman_opts.items():
-                if k == 'satellite6_group_patterns' and isinstance(v, str):
-                    group_patterns = v
-                elif k == 'satellite6_group_prefix' and isinstance(v, str):
-                    group_prefix = v
-                elif k == 'satellite6_want_hostcollections' and isinstance(v, bool):
-                    want_hostcollections = v
-                else:
-                    cp.set(section, k, str(v))
-
-            if credential:
-                cp.set(section, 'url', credential.get_input('host', default=''))
-                cp.set(section, 'user', credential.get_input('username', default=''))
-                cp.set(section, 'password', credential.get_input('password', default=''))
-
-            section = 'ansible'
-            cp.add_section(section)
-            cp.set(section, 'group_patterns', group_patterns)
-            cp.set(section, 'want_facts', 'True')
-            cp.set(section, 'want_hostcollections', str(want_hostcollections))
-            cp.set(section, 'group_prefix', group_prefix)
-
-            section = 'cache'
-            cp.add_section(section)
-            cp.set(section, 'path', '/tmp')
-            cp.set(section, 'max_age', '0')
-
-        elif inventory_update.source == 'cloudforms':
-            section = 'cloudforms'
-            cp.add_section(section)
-
-            if credential:
-                cp.set(section, 'url', credential.get_input('host', default=''))
-                cp.set(section, 'username', credential.get_input('username', default=''))
-                cp.set(section, 'password', credential.get_input('password', default=''))
-                cp.set(section, 'ssl_verify', "false")
-
-            cloudforms_opts = dict(inventory_update.source_vars_dict.items())
-            for opt in ['version', 'purge_actions', 'clean_group_keys', 'nest_tags', 'suffix', 'prefer_ipv4']:
-                if opt in cloudforms_opts:
-                    cp.set(section, opt, str(cloudforms_opts[opt]))
-
-            section = 'cache'
-            cp.add_section(section)
-            cp.set(section, 'max_age', "0")
-            cache_path = tempfile.mkdtemp(
-                prefix='cloudforms_cache',
-                dir=kwargs.get('private_data_dir', None)
-            )
-            cp.set(section, 'path', cache_path)
-
-        elif inventory_update.source == 'azure_rm':
-            section = 'azure'
-            cp.add_section(section)
-            cp.set(section, 'include_powerstate', 'yes')
-            cp.set(section, 'group_by_resource_group', 'yes')
-            cp.set(section, 'group_by_location', 'yes')
-            cp.set(section, 'group_by_tag', 'yes')
-
-            if inventory_update.source_regions and 'all' not in inventory_update.source_regions:
-                cp.set(
-                    section, 'locations',
-                    ','.join([x.strip() for x in inventory_update.source_regions.split(',')])
-                )
-
-            azure_rm_opts = dict(inventory_update.source_vars_dict.items())
-            for k, v in azure_rm_opts.items():
-                cp.set(section, k, str(v))
-
-        # Return INI content.
-        if cp.sections():
-            f = StringIO()
-            cp.write(f)
-            private_data['credentials'][credential] = f.getvalue()
-            return private_data
-
-    def build_passwords(self, inventory_update, **kwargs):
+    def build_passwords(self, inventory_update, runtime_passwords):
         """Build a dictionary of authentication/credential information for
         an inventory source.
 
         This dictionary is used by `build_env`, below.
         """
         # Run the superclass implementation.
-        passwords = super(RunInventoryUpdate, self).build_passwords(inventory_update, **kwargs)
+        passwords = super(RunInventoryUpdate, self).build_passwords(inventory_update, runtime_passwords)
 
         # Take key fields from the credential in use and add them to the
         # passwords dictionary.
@@ -2053,73 +2002,59 @@ class RunInventoryUpdate(BaseTask):
                 passwords[k] = credential.get_input(passkey, default='')
         return passwords
 
-    def build_env(self, inventory_update, **kwargs):
+    def build_env(self, inventory_update, private_data_dir, isolated, private_data_files=None):
         """Build environment dictionary for inventory import.
 
-        This is the mechanism by which any data that needs to be passed
+        This used to be the mechanism by which any data that needs to be passed
         to the inventory update script is set up. In particular, this is how
         inventory update is aware of its proper credentials.
+
+        Most environment injection is now accomplished by the credential
+        injectors. The primary purpose this still serves is to
+        still point to the inventory update INI or config file.
         """
         env = super(RunInventoryUpdate, self).build_env(inventory_update,
-                                                        **kwargs)
-        env = self.add_awx_venv(env)
+                                                        private_data_dir,
+                                                        isolated,
+                                                        private_data_files=private_data_files)
+        if private_data_files is None:
+            private_data_files = {}
+        self.add_awx_venv(env)
         # Pass inventory source ID to inventory script.
         env['INVENTORY_SOURCE_ID'] = str(inventory_update.inventory_source_id)
         env['INVENTORY_UPDATE_ID'] = str(inventory_update.pk)
         env.update(STANDARD_INVENTORY_UPDATE_ENV)
-        plugin_name = inventory_update.get_inventory_plugin_name()
-        if plugin_name is not None:
-            env['ANSIBLE_INVENTORY_ENABLED'] = plugin_name
 
-        # Set environment variables specific to each source.
-        #
-        # These are set here and then read in by the various Ansible inventory
-        # modules, which will actually do the inventory sync.
-        #
-        # The inventory modules are vendored in AWX in the
-        # `awx/plugins/inventory` directory; those files should be kept in
-        # sync with those in Ansible core at all times.
+        injector = None
+        if inventory_update.source in InventorySource.injectors:
+            injector = InventorySource.injectors[inventory_update.source](self.get_ansible_version(inventory_update))
 
-        ini_mapping = {
-            'ec2': 'EC2_INI_PATH',
-            'vmware': 'VMWARE_INI_PATH',
-            'azure_rm': 'AZURE_INI_PATH',
-            'openstack': 'OS_CLIENT_CONFIG_FILE',
-            'satellite6': 'FOREMAN_INI_PATH',
-            'cloudforms': 'CLOUDFORMS_INI_PATH'
-        }
-        if inventory_update.source in ini_mapping:
-            cred_data = kwargs.get('private_data_files', {}).get('credentials', '')
-            env[ini_mapping[inventory_update.source]] = cred_data.get(
-                inventory_update.get_cloud_credential(), ''
-            )
+        if injector is not None:
+            env = injector.build_env(inventory_update, env, private_data_dir, private_data_files)
+            # All CLOUD_PROVIDERS sources implement as either script or auto plugin
+            if injector.should_use_plugin():
+                env['ANSIBLE_INVENTORY_ENABLED'] = 'auto'
+            else:
+                env['ANSIBLE_INVENTORY_ENABLED'] = 'script'
 
-        if inventory_update.source == 'gce':
-            env['GCE_ZONE'] = inventory_update.source_regions if inventory_update.source_regions != 'all' else ''  # noqa
-
-            # by default, the GCE inventory source caches results on disk for
-            # 5 minutes; disable this behavior
-            cp = configparser.ConfigParser()
-            cp.add_section('cache')
-            cp.set('cache', 'cache_max_age', '0')
-            handle, path = tempfile.mkstemp(dir=kwargs.get('private_data_dir', None))
-            cp.write(os.fdopen(handle, 'w'))
-            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-            env['GCE_INI_PATH'] = path
-        elif inventory_update.source in ['scm', 'custom']:
+        if inventory_update.source in ['scm', 'custom']:
             for env_k in inventory_update.source_vars_dict:
                 if str(env_k) not in env and str(env_k) not in settings.INV_ENV_VARIABLE_BLACKLIST:
                     env[str(env_k)] = str(inventory_update.source_vars_dict[env_k])
-        elif inventory_update.source == 'tower':
-            env['TOWER_INVENTORY'] = inventory_update.instance_filters
-            env['TOWER_LICENSE_TYPE'] = get_licenser().validate()['license_type']
         elif inventory_update.source == 'file':
             raise NotImplementedError('Cannot update file sources through the task system.')
-        # add private_data_files
-        env['AWX_PRIVATE_DATA_DIR'] = kwargs.get('private_data_dir', '')
         return env
 
-    def build_args(self, inventory_update, **kwargs):
+    def write_args_file(self, private_data_dir, args):
+        path = os.path.join(private_data_dir, 'args')
+        handle = os.open(path, os.O_RDWR | os.O_CREAT, stat.S_IREAD | stat.S_IWRITE)
+        f = os.fdopen(handle, 'w')
+        f.write(' '.join(args))
+        f.close()
+        os.chmod(path, stat.S_IRUSR)
+        return path
+
+    def build_args(self, inventory_update, private_data_dir, passwords):
         """Build the command line argument list for running an inventory
         import.
         """
@@ -2170,38 +2105,80 @@ class RunInventoryUpdate(BaseTask):
                         getattr(settings, '%s_INSTANCE_ID_VAR' % src.upper()),])
         # Add arguments for the source inventory script
         args.append('--source')
-        if src in CLOUD_PROVIDERS:
-            # Get the path to the inventory plugin, and append it to our
-            # arguments.
-            plugin_path = self.get_path_to('..', 'plugins', 'inventory',
-                                           '%s.py' % src)
-            args.append(plugin_path)
-        elif src == 'scm':
-            args.append(inventory_update.get_actual_source_path())
-        elif src == 'custom':
-            handle, path = tempfile.mkstemp(dir=kwargs['private_data_dir'])
-            f = os.fdopen(handle, 'w')
-            if inventory_update.source_script is None:
-                raise RuntimeError('Inventory Script does not exist')
-            f.write(inventory_update.source_script.script)
-            f.close()
-            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-            args.append(path)
+        args.append(self.psuedo_build_inventory(inventory_update, private_data_dir))
+        if src == 'custom':
             args.append("--custom")
         args.append('-v%d' % inventory_update.verbosity)
         if settings.DEBUG:
             args.append('--traceback')
         return args
 
-    def build_cwd(self, inventory_update, **kwargs):
-        if inventory_update.source == 'scm' and inventory_update.source_project_update:
+    def build_inventory(self, inventory_update, private_data_dir):
+        return None  # what runner expects in order to not deal with inventory
+
+    def psuedo_build_inventory(self, inventory_update, private_data_dir):
+        """Inventory imports are ran through a management command
+        we pass the inventory in args to that command, so this is not considered
+        to be "Ansible" inventory (by runner) even though it is
+        Eventually, we would like to cut out the management command,
+        and thus use this as the real inventory
+        """
+        src = inventory_update.source
+
+        injector = None
+        if inventory_update.source in InventorySource.injectors:
+            injector = InventorySource.injectors[src](self.get_ansible_version(inventory_update))
+
+        if injector is not None:
+            if injector.should_use_plugin():
+                content = injector.inventory_contents(inventory_update, private_data_dir)
+                # must be a statically named file
+                inventory_path = os.path.join(private_data_dir, injector.filename)
+                with open(inventory_path, 'w') as f:
+                    f.write(content)
+                os.chmod(inventory_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+            else:
+                # Use the vendored script path
+                inventory_path = self.get_path_to('..', 'plugins', 'inventory', injector.script_name)
+        elif src == 'scm':
+            inventory_path = inventory_update.get_actual_source_path()
+        elif src == 'custom':
+            handle, inventory_path = tempfile.mkstemp(dir=private_data_dir)
+            f = os.fdopen(handle, 'w')
+            if inventory_update.source_script is None:
+                raise RuntimeError('Inventory Script does not exist')
+            f.write(inventory_update.source_script.script)
+            f.close()
+            os.chmod(inventory_path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        return inventory_path
+
+    def build_cwd(self, inventory_update, private_data_dir):
+        '''
+        There are two cases where the inventory "source" is in a different
+        location from the private data:
+         - deprecated vendored inventory scripts in awx/plugins/inventory
+         - SCM, where source needs to live in the project folder
+        in these cases, the inventory does not exist in the standard tempdir
+        '''
+        src = inventory_update.source
+        if src == 'scm' and inventory_update.source_project_update:
             return inventory_update.source_project_update.get_project_path(check_if_exists=False)
-        return self.get_path_to('..', 'plugins', 'inventory')
+        if src in CLOUD_PROVIDERS:
+            injector = None
+            if src in InventorySource.injectors:
+                injector = InventorySource.injectors[src](self.get_ansible_version(inventory_update))
+            if (not injector) or (not injector.should_use_plugin()):
+                return self.get_path_to('..', 'plugins', 'inventory')
+        return private_data_dir
 
-    def get_idle_timeout(self):
-        return getattr(settings, 'INVENTORY_UPDATE_IDLE_TIMEOUT', None)
+    def build_playbook_path_relative_to_cwd(self, inventory_update, private_data_dir):
+        return None
 
-    def pre_run_hook(self, inventory_update, **kwargs):
+    def build_credentials_list(self, inventory_update):
+        # All credentials not used by inventory source injector
+        return inventory_update.get_extra_credentials()
+
+    def pre_run_hook(self, inventory_update):
         source_project = None
         if inventory_update.inventory_source:
             source_project = inventory_update.inventory_source.source_project
@@ -2241,7 +2218,7 @@ class RunAdHocCommand(BaseTask):
     event_model = AdHocCommandEvent
     event_data_key = 'ad_hoc_command_id'
 
-    def build_private_data(self, ad_hoc_command, **kwargs):
+    def build_private_data(self, ad_hoc_command, private_data_dir):
         '''
         Return SSH private key data needed for this ad hoc command (only if
         stored in DB as ssh_key_data).
@@ -2251,7 +2228,12 @@ class RunAdHocCommand(BaseTask):
             'credentials': {
                 <awx.main.models.Credential>: <credential_decrypted_ssh_key_data>,
                 <awx.main.models.Credential>: <credential_decrypted_ssh_key_data>,
-                <awx.main.models.Credential>: <credential_decrypted_ssh_key_data>
+                ...
+            },
+            'certificates': {
+                <awx.main.models.Credential>: <signed SSH certificate data>,
+                <awx.main.models.Credential>: <signed SSH certificate data>,
+                ...
             }
         }
         '''
@@ -2261,32 +2243,33 @@ class RunAdHocCommand(BaseTask):
         private_data = {'credentials': {}}
         if creds and creds.has_input('ssh_key_data'):
             private_data['credentials'][creds] = creds.get_input('ssh_key_data', default='')
+        if creds and creds.has_input('ssh_public_key_data'):
+            private_data.setdefault('certificates', {})[creds] = creds.get_input('ssh_public_key_data', default='')
         return private_data
 
-    def build_passwords(self, ad_hoc_command, **kwargs):
+    def build_passwords(self, ad_hoc_command, runtime_passwords):
         '''
         Build a dictionary of passwords for SSH private key, SSH user and
         sudo/su.
         '''
-        passwords = super(RunAdHocCommand, self).build_passwords(ad_hoc_command, **kwargs)
-        creds = ad_hoc_command.credential
-        if creds:
+        passwords = super(RunAdHocCommand, self).build_passwords(ad_hoc_command, runtime_passwords)
+        cred = ad_hoc_command.credential
+        if cred:
             for field in ('ssh_key_unlock', 'ssh_password', 'become_password'):
-                if field == 'ssh_password':
-                    value = kwargs.get(field, creds.get_input('password', default=''))
-                else:
-                    value = kwargs.get(field, creds.get_input(field, default=''))
+                value = runtime_passwords.get(field, cred.get_input('password' if field == 'ssh_password' else field, default=''))
                 if value not in ('', 'ASK'):
                     passwords[field] = value
         return passwords
 
-    def build_env(self, ad_hoc_command, **kwargs):
+    def build_env(self, ad_hoc_command, private_data_dir, isolated=False, private_data_files=None):
         '''
         Build environment dictionary for ansible.
         '''
         plugin_dir = self.get_path_to('..', 'plugins', 'callback')
-        env = super(RunAdHocCommand, self).build_env(ad_hoc_command, **kwargs)
-        env = self.add_ansible_venv(settings.ANSIBLE_VENV_PATH, env)
+        env = super(RunAdHocCommand, self).build_env(ad_hoc_command, private_data_dir,
+                                                     isolated=isolated,
+                                                     private_data_files=private_data_files)
+        self.add_ansible_venv(settings.ANSIBLE_VENV_PATH, env)
         # Set environment variables needed for inventory and ad hoc event
         # callbacks to work.
         env['AD_HOC_COMMAND_ID'] = str(ad_hoc_command.pk)
@@ -2294,9 +2277,7 @@ class RunAdHocCommand(BaseTask):
         env['INVENTORY_HOSTVARS'] = str(True)
         env['ANSIBLE_CALLBACK_PLUGINS'] = plugin_dir
         env['ANSIBLE_LOAD_CALLBACK_PLUGINS'] = '1'
-        env['ANSIBLE_STDOUT_CALLBACK'] = 'minimal'  # Hardcoded by Ansible for ad-hoc commands (either minimal or oneline).
         env['ANSIBLE_SFTP_BATCH_MODE'] = 'False'
-        env['CACHE'] = settings.CACHES['default']['LOCATION'] if 'LOCATION' in settings.CACHES['default'] else ''
 
         # Specify empty SSH args (should disable ControlPersist entirely for
         # ad hoc commands).
@@ -2304,7 +2285,7 @@ class RunAdHocCommand(BaseTask):
 
         return env
 
-    def build_args(self, ad_hoc_command, **kwargs):
+    def build_args(self, ad_hoc_command, private_data_dir, passwords):
         '''
         Build command line argument list for running ansible, optionally using
         ssh-agent for public/private key authentication.
@@ -2312,9 +2293,9 @@ class RunAdHocCommand(BaseTask):
         creds = ad_hoc_command.credential
         ssh_username, become_username, become_method = '', '', ''
         if creds:
-            ssh_username = kwargs.get('username', creds.get_input('username', default=''))
-            become_method = kwargs.get('become_method', creds.get_input('become_method', default=''))
-            become_username = kwargs.get('become_username', creds.get_input('become_username', default=''))
+            ssh_username = creds.username
+            become_method = creds.become_method
+            become_username = creds.become_username
         else:
             become_method = None
             become_username = ""
@@ -2323,15 +2304,11 @@ class RunAdHocCommand(BaseTask):
         # it doesn't make sense to rely on ansible's default of using the
         # current user.
         ssh_username = ssh_username or 'root'
-        args = [
-            self.get_path_to_ansible(ad_hoc_command, 'ansible', **kwargs),
-            '-i',
-            self.build_inventory(ad_hoc_command, **kwargs)
-        ]
+        args = []
         if ad_hoc_command.job_type == 'check':
             args.append('--check')
         args.extend(['-u', sanitize_jinja(ssh_username)])
-        if 'ssh_password' in kwargs.get('passwords', {}):
+        if 'ssh_password' in passwords:
             args.append('--ask-pass')
         # We only specify sudo/su user and password if explicitly given by the
         # credential.  Credential should never specify both sudo and su.
@@ -2341,7 +2318,7 @@ class RunAdHocCommand(BaseTask):
             args.extend(['--become-method', sanitize_jinja(become_method)])
         if become_username:
             args.extend(['--become-user', sanitize_jinja(become_username)])
-        if 'become_password' in kwargs.get('passwords', {}):
+        if 'become_password' in passwords:
             args.append('--ask-become-pass')
 
         if ad_hoc_command.forks:  # FIXME: Max limit?
@@ -2360,14 +2337,6 @@ class RunAdHocCommand(BaseTask):
                     "{} are prohibited from use in ad hoc commands."
                 ).format(", ".join(removed_vars)))
             extra_vars.update(ad_hoc_command.extra_vars_dict)
-        extra_vars_path = self.build_extra_vars_file(vars=extra_vars, **kwargs)
-        args.extend(['-e', '@%s' % (extra_vars_path)])
-
-        args.extend(['-m', ad_hoc_command.module_name])
-        module_args = ad_hoc_command.module_args
-        if settings.ALLOW_JINJA_IN_EXTRA_VARS != 'always':
-            module_args = sanitize_jinja(module_args)
-        args.extend(['-a', module_args])
 
         if ad_hoc_command.limit:
             args.append(ad_hoc_command.limit)
@@ -2376,29 +2345,55 @@ class RunAdHocCommand(BaseTask):
 
         return args
 
-    def build_cwd(self, ad_hoc_command, **kwargs):
-        return kwargs['private_data_dir']
+    def build_extra_vars_file(self, ad_hoc_command, private_data_dir, passwords={}):
+        extra_vars = ad_hoc_command.awx_meta_vars()
 
-    def get_idle_timeout(self):
-        return getattr(settings, 'JOB_RUN_IDLE_TIMEOUT', None)
+        if ad_hoc_command.extra_vars_dict:
+            redacted_extra_vars, removed_vars = extract_ansible_vars(ad_hoc_command.extra_vars_dict)
+            if removed_vars:
+                raise ValueError(_(
+                    "{} are prohibited from use in ad hoc commands."
+                ).format(", ".join(removed_vars)))
+            extra_vars.update(ad_hoc_command.extra_vars_dict)
+        self._write_extra_vars_file(private_data_dir, extra_vars)
 
-    def get_password_prompts(self, **kwargs):
-        d = super(RunAdHocCommand, self).get_password_prompts(**kwargs)
-        d[re.compile(r'Enter passphrase for .*:\s*?$', re.M)] = 'ssh_key_unlock'
-        d[re.compile(r'Bad passphrase, try again for .*:\s*?$', re.M)] = ''
+    def build_module_name(self, ad_hoc_command):
+        return ad_hoc_command.module_name
+
+    def build_module_args(self, ad_hoc_command):
+        module_args = ad_hoc_command.module_args
+        if settings.ALLOW_JINJA_IN_EXTRA_VARS != 'always':
+            module_args = sanitize_jinja(module_args)
+        return module_args
+
+    def build_cwd(self, ad_hoc_command, private_data_dir):
+        return private_data_dir
+
+    def build_playbook_path_relative_to_cwd(self, job, private_data_dir):
+        return None
+
+    def get_password_prompts(self, passwords={}):
+        d = super(RunAdHocCommand, self).get_password_prompts()
+        d[r'Enter passphrase for .*:\s*?$'] = 'ssh_key_unlock'
+        d[r'Bad passphrase, try again for .*:\s*?$'] = ''
         for method in PRIVILEGE_ESCALATION_METHODS:
-            d[re.compile(r'%s password.*:\s*?$' % (method[0]), re.M)] = 'become_password'
-            d[re.compile(r'%s password.*:\s*?$' % (method[0].upper()), re.M)] = 'become_password'
-        d[re.compile(r'BECOME password.*:\s*?$', re.M)] = 'become_password'
-        d[re.compile(r'SSH password:\s*?$', re.M)] = 'ssh_password'
-        d[re.compile(r'Password:\s*?$', re.M)] = 'ssh_password'
+            d[r'%s password.*:\s*?$' % (method[0])] = 'become_password'
+            d[r'%s password.*:\s*?$' % (method[0].upper())] = 'become_password'
+        d[r'BECOME password.*:\s*?$'] = 'become_password'
+        d[r'SSH password:\s*?$'] = 'ssh_password'
+        d[r'Password:\s*?$'] = 'ssh_password'
         return d
 
-    def should_use_proot(self, instance, **kwargs):
+    def should_use_proot(self, ad_hoc_command):
         '''
         Return whether this task should use proot.
         '''
         return getattr(settings, 'AWX_PROOT_ENABLED', False)
+
+    def final_run_hook(self, adhoc_job, status, private_data_dir, fact_modification_times, isolated_manager_instance=None):
+        super(RunAdHocCommand, self).final_run_hook(adhoc_job, status, private_data_dir, fact_modification_times)
+        if isolated_manager_instance:
+            isolated_manager_instance.cleanup()
 
 
 @task()
@@ -2408,7 +2403,7 @@ class RunSystemJob(BaseTask):
     event_model = SystemJobEvent
     event_data_key = 'system_job_id'
 
-    def build_args(self, system_job, **kwargs):
+    def build_args(self, system_job, private_data_dir, passwords):
         args = ['awx-manage', system_job.job_type]
         try:
             # System Job extra_vars can be blank, must be JSON if not blank
@@ -2428,14 +2423,30 @@ class RunSystemJob(BaseTask):
             logger.exception("{} Failed to parse system job".format(system_job.log_format))
         return args
 
-    def build_env(self, instance, **kwargs):
-        env = super(RunSystemJob, self).build_env(instance,
-                                                  **kwargs)
-        env = self.add_awx_venv(env)
+    def write_args_file(self, private_data_dir, args):
+        path = os.path.join(private_data_dir, 'args')
+        handle = os.open(path, os.O_RDWR | os.O_CREAT, stat.S_IREAD | stat.S_IWRITE)
+        f = os.fdopen(handle, 'w')
+        f.write(' '.join(args))
+        f.close()
+        os.chmod(path, stat.S_IRUSR)
+        return path
+
+    def build_env(self, instance, private_data_dir, isolated=False, private_data_files=None):
+        env = super(RunSystemJob, self).build_env(instance, private_data_dir,
+                                                  isolated=isolated,
+                                                  private_data_files=private_data_files)
+        self.add_awx_venv(env)
         return env
 
-    def build_cwd(self, instance, **kwargs):
+    def build_cwd(self, instance, private_data_dir):
         return settings.BASE_DIR
+
+    def build_playbook_path_relative_to_cwd(self, job, private_data_dir):
+        return None
+
+    def build_inventory(self, instance, private_data_dir):
+        return None
 
 
 def _reconstruct_relationships(copy_mapping):

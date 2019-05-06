@@ -48,10 +48,6 @@ function JobStatusGraph($window, adjustGraphSize, templateUrl, i18n, moment, gra
                         });
                 }
 
-                scope.$on('jobStatusChange', function(event, status){
-                    recreateGraph(scope.period, scope.jobType, status);
-                });
-
                 function createGraph(period, jobtype, data, status){
                     scope.period = period;
                     scope.jobType = jobtype;
@@ -100,6 +96,11 @@ function JobStatusGraph($window, adjustGraphSize, templateUrl, i18n, moment, gra
                     job_status_chart.interactiveLayer.tooltip.fixedTop(-10); //distance from the top of the chart to tooltip
                     job_status_chart.interactiveLayer.tooltip.distance(-1); //distance from interactive line to tooltip
 
+                    scope.$on('$destroy', function() {
+                        job_status_chart.tooltip.hidden(true);
+                        job_status_chart.interactiveLayer.tooltip.hidden(true);
+                    });
+
                     job_status_chart.xAxis
                     .axisLabel(i18n._("TIME"))//.showMaxMin(true)
                     .tickFormat(function(d) {
@@ -130,13 +131,11 @@ function JobStatusGraph($window, adjustGraphSize, templateUrl, i18n, moment, gra
                     $('.n').off('click').on("click", function(){
                         period = this.getAttribute("id");
 
-                        $('#period-dropdown')
-                            .replaceWith(`
-                                <a id="period-dropdown" class="DashboardGraphs-filterDropdownText DashboardGraphs-filterDropdownItems--period" role="button"
-                                   data-toggle="dropdown" data-target="#" href="/page.html">
-                                    <span>${this.text}</span>
-                                    <i class="fa fa-angle-down DashboardGraphs-filterIcon"></i>
-                                </a>`);
+                        $('#period-dropdown-display')
+                            .html(`
+                                <span>${this.text}</span>
+                                <i class="fa fa-angle-down DashboardGraphs-filterIcon"></i>
+                            `);
 
                         scope.$parent.isFailed = true;
                         scope.$parent.isSuccessful = true;
@@ -147,13 +146,11 @@ function JobStatusGraph($window, adjustGraphSize, templateUrl, i18n, moment, gra
                     $('.m').off('click').on("click", function(){
                         job_type = this.getAttribute("id");
 
-                        $('#type-dropdown')
-                            .replaceWith(`
-                                <a id="type-dropdown" class="DashboardGraphs-filterDropdownText DashboardGraphs-filterDropdownItems--jobType" role="button"
-                                   data-toggle="dropdown" data-target="#" href="/page.html">
-                                    <span>${this.text}</span>
-                                    <i class="fa fa-angle-down DashboardGraphs-filterIcon"></i>
-                                </a>`);
+                        $('#type-dropdown-display')
+                            .html(`
+                                <span>${this.text}</span>
+                                <i class="fa fa-angle-down DashboardGraphs-filterIcon"></i>
+                            `);
 
                         scope.$parent.isFailed = true;
                         scope.$parent.isSuccessful = true;
@@ -163,15 +160,13 @@ function JobStatusGraph($window, adjustGraphSize, templateUrl, i18n, moment, gra
                     $('.o').off('click').on('click', function() {
                         var job_status = this.getAttribute('id');
 
-                        $('#status-dropdown')
-                            .replaceWith(`
-                                <a id="status-dropdown" class="DashboardGraphs-filterDropdownText DashboardGraphs-filterDropdownItems--status" role="button"
-                                   data-toggle="dropdown" data-target="#" href="/page.html">
-                                    <span>${this.text}</span>
-                                    <i class="fa fa-angle-down DashboardGraphs-filterIcon"></i>
-                                </a>`);
+                        $('#status-dropdown-display')
+                            .html(`
+                                <span>${this.text}</span>
+                                <i class="fa fa-angle-down DashboardGraphs-filterIcon"></i>
+                            `);
 
-                        scope.$broadcast("jobStatusChange", job_status);
+                        recreateGraph(scope.period, scope.jobType, job_status);
                     });
 
                     adjustGraphSize(job_status_chart, element);

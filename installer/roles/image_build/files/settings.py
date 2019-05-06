@@ -6,7 +6,6 @@ import os
 def get_secret():
     if os.path.exists("/etc/tower/SECRET_KEY"):
         return open('/etc/tower/SECRET_KEY', 'rb').read().strip()
-    return os.getenv("SECRET_KEY", "privateawx")
 
 
 ADMINS = ()
@@ -65,7 +64,6 @@ LOGGING['loggers']['system_tracking_migrations']['handlers'] = ['console']
 LOGGING['loggers']['rbac_migrations']['handlers'] = ['console']
 LOGGING['loggers']['awx.isolated.manager.playbooks']['handlers'] = ['console']
 LOGGING['handlers']['callback_receiver'] = {'class': 'logging.NullHandler'}
-LOGGING['handlers']['fact_receiver'] = {'class': 'logging.NullHandler'}
 LOGGING['handlers']['task_system'] = {'class': 'logging.NullHandler'}
 LOGGING['handlers']['tower_warnings'] = {'class': 'logging.NullHandler'}
 LOGGING['handlers']['rbac_migrations'] = {'class': 'logging.NullHandler'}
@@ -75,7 +73,7 @@ LOGGING['handlers']['management_playbooks'] = {'class': 'logging.NullHandler'}
 DATABASES = {
     'default': {
         'ATOMIC_REQUESTS': True,
-        'ENGINE': 'django.db.backends.postgresql',
+        'ENGINE': 'awx.main.db.profiled_pg',
         'NAME': os.getenv("DATABASE_NAME", None),
         'USER': os.getenv("DATABASE_USER", None),
         'PASSWORD': os.getenv("DATABASE_PASSWORD", None),
@@ -98,18 +96,6 @@ CHANNEL_LAYERS = {
     'default': {'BACKEND': 'asgi_amqp.AMQPChannelLayer',
                 'ROUTING': 'awx.main.routing.channel_routing',
                 'CONFIG': {'url': BROKER_URL}}
-}
-
-
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.memcached.MemcachedCache',
-        'LOCATION': '{}:{}'.format(os.getenv("MEMCACHED_HOST", None),
-                                   os.getenv("MEMCACHED_PORT", "11211"))
-    },
-    'ephemeral': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-    },
 }
 
 USE_X_FORWARDED_PORT = True

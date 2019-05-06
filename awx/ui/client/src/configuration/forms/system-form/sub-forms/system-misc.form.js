@@ -54,6 +54,13 @@ export default ['i18n', function(i18n) {
             REMOTE_HOST_HEADERS: {
                 type: 'textarea',
                 reset: 'REMOTE_HOST_HEADERS'
+            },
+            CUSTOM_VENV_PATHS: {
+                type: 'textarea',
+                reset: 'CUSTOM_VENV_PATHS'
+            },
+            INSIGHTS_TRACKING_STATE: {
+                type: 'toggleSwitch'
             }
         },
 

@@ -13,6 +13,7 @@ function projectsListController (
 ) {
     const vm = this || {};
     const [ProjectModel] = resolvedModels;
+    let paginateQuerySet = {};
     $scope.canAdd = ProjectModel.options('actions.POST');
 
     vm.strings = strings;
@@ -27,6 +28,7 @@ function projectsListController (
     };
     vm.dataset = Dataset.data;
     vm.projects = Dataset.data.results;
+
     $scope.$watch('vm.dataset.count', () => {
         $scope.$emit('updateCount', vm.dataset.count, 'projects');
     });
@@ -46,7 +48,61 @@ function projectsListController (
         } else {
             vm.activeId = '';
         }
+        setToolbarSort();
     }, true);
+
+    function setToolbarSort () {
+        const orderByValue = _.get($state.params, 'project_search.order_by');
+        const sortValue = _.find(vm.toolbarSortOptions, (option) => option.value === orderByValue);
+        if (sortValue) {
+            vm.toolbarSortValue = sortValue;
+        } else {
+            vm.toolbarSortValue = toolbarSortDefault;
+        }
+    }
+
+    const toolbarSortDefault = {
+        label: `${strings.get('sort.NAME_ASCENDING')}`,
+        value: 'name'
+    };
+
+    vm.toolbarSortOptions = [
+        toolbarSortDefault,
+        { label: `${strings.get('sort.NAME_DESCENDING')}`, value: '-name' },
+        { label: `${strings.get('sort.MODIFIED_ASCENDING')}`, value: 'modified' },
+        { label: `${strings.get('sort.MODIFIED_DESCENDING')}`, value: '-modified' },
+        { label: `${strings.get('sort.LAST_USED_ASCENDING')}`, value: 'last_job_run' },
+        { label: `${strings.get('sort.LAST_USED_DESCENDING')}`, value: '-last_job_run' },
+        { label: `${strings.get('sort.ORGANIZATION_ASCENDING')}`, value: 'organization' },
+        { label: `${strings.get('sort.ORGANIZATION_DESCENDING')}`, value: '-organization' }
+    ];
+
+    vm.toolbarSortValue = toolbarSortDefault;
+
+    // Temporary hack to retrieve $scope.querySet from the paginate directive.
+    // Remove this event listener once the page and page_size params
+    // are represented in the url.
+    $scope.$on('updateDataset', (event, dataset, queryset) => {
+        vm.dataset = dataset;
+        vm.projects = dataset.results;
+        paginateQuerySet = queryset;
+    });
+
+    vm.onToolbarSort = (sort) => {
+        vm.toolbarSortValue = sort;
+
+        const queryParams = Object.assign(
+            {},
+            $state.params.project_search,
+            paginateQuerySet,
+            { order_by: sort.value }
+        );
+
+        // Update URL with params
+        $state.go('.', {
+            project_search: queryParams
+        }, { notify: false, location: 'replace' });
+    };
 
     $scope.$on('ws-jobs', (e, data) => {
         $log.debug(data);

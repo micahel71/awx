@@ -1,5 +1,5 @@
-export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
-    function (ProcessErrors, CredentialType, strings) {
+export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings', '$filter',
+    function (ProcessErrors, CredentialType, strings, $filter) {
 
         const vm = this || {};
 
@@ -7,6 +7,7 @@ export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
 
         let scope;
         let modal;
+        let activeTab;
 
         vm.init = (_scope_) => {
             scope = _scope_;
@@ -52,12 +53,10 @@ export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
                     .then( (response) => {
                         vm.promptDataClone.prompts.credentials.credentialTypes = {};
                         vm.promptDataClone.prompts.credentials.credentialTypeOptions = [];
-                        let machineCredTypeId = null;
                         response.data.results.forEach((credentialTypeRow => {
                             vm.promptDataClone.prompts.credentials.credentialTypes[credentialTypeRow.id] = credentialTypeRow.kind;
                             if(credentialTypeRow.kind.match(/^(cloud|net|ssh|vault)$/)) {
                                 if(credentialTypeRow.kind === 'ssh') {
-                                    machineCredTypeId = credentialTypeRow.id;
                                     vm.promptDataClone.prompts.credentials.credentialKind = credentialTypeRow.id.toString();
                                 }
                                 vm.promptDataClone.prompts.credentials.credentialTypeOptions.push({
@@ -139,6 +138,7 @@ export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
                                 _active: true,
                                 order: order
                             };
+                            activeTab = activeTab || vm.steps.inventory.tab;
                             order++;
                         }
                         if (vm.promptDataClone.launchConf.ask_credential_on_launch ||
@@ -154,6 +154,7 @@ export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
                                 _disabled: (order === 1 || vm.readOnlyPrompts) ? false : true,
                                 order: order
                             };
+                            activeTab = activeTab || vm.steps.credential.tab;
                             order++;
                         }
                         if(vm.promptDataClone.launchConf.ask_verbosity_on_launch || vm.promptDataClone.launchConf.ask_job_type_on_launch || vm.promptDataClone.launchConf.ask_limit_on_launch || vm.promptDataClone.launchConf.ask_tags_on_launch || vm.promptDataClone.launchConf.ask_skip_tags_on_launch || (vm.promptDataClone.launchConf.ask_variables_on_launch && !vm.promptDataClone.launchConf.ignore_ask_variables) || vm.promptDataClone.launchConf.ask_diff_mode_on_launch) {
@@ -163,6 +164,7 @@ export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
                                 _disabled: (order === 1 || vm.readOnlyPrompts) ? false : true,
                                 order: order
                             };
+                            activeTab = activeTab || vm.steps.other_prompts.tab;
                             order++;
 
                             let codemirror = () =>  {
@@ -179,11 +181,12 @@ export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
                                 _disabled: (order === 1 || vm.readOnlyPrompts) ? false : true,
                                 order: order
                             };
+                            activeTab = activeTab || vm.steps.survey.tab;
                             order++;
                         }
                         vm.steps.preview.tab.order = order;
                         vm.steps.preview.tab._disabled = vm.readOnlyPrompts ? false : true;
-                        modal.show(strings.get('prompt.PROMPT'));
+                        modal.show($filter('sanitize')(vm.promptDataClone.templateName));
                         vm.promptData.triggerModalOpen = false;
 
                         modal.onClose = () => {
@@ -216,11 +219,19 @@ export default [ 'ProcessErrors', 'CredentialTypeModel', 'TemplatesStrings',
                     if(vm.steps[step].tab.order === currentTab.order) {
                         vm.steps[step].tab._active = false;
                     } else if(vm.steps[step].tab.order === currentTab.order + 1) {
+                        activeTab = currentTab;
                         vm.steps[step].tab._active = true;
                         vm.steps[step].tab._disabled = false;
+                        scope.$broadcast('promptTabChange', { step });
                     }
                 }
             });
+        };
+
+        vm.keypress = (event) => {
+          if (event.key === 'Enter') {
+            vm.next(activeTab);
+          }
         };
 
         vm.finish = () => {

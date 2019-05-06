@@ -60,7 +60,7 @@ I18N_FLAG_FILE = .i18n_built
 
 .PHONY: awx-link clean clean-tmp clean-venv requirements requirements_dev \
 	develop refresh adduser migrate dbchange dbshell runserver \
-	receiver test test_unit test_ansible test_coverage coverage_html \
+	receiver test test_unit test_coverage coverage_html \
 	dev_build release_build release_clean sdist \
 	ui-docker-machine ui-docker ui-release ui-devel \
 	ui-test ui-deps ui-test-ci VERSION
@@ -134,8 +134,8 @@ virtualenv_ansible_py3:
 		if [ ! -d "$(VENV_BASE)" ]; then \
 			mkdir $(VENV_BASE); \
 		fi; \
-		if [ ! -d "$(VENV_BASE)/ansible3" ]; then \
-			python3 -m venv --system-site-packages $(VENV_BASE)/ansible3; \
+		if [ ! -d "$(VENV_BASE)/ansible" ]; then \
+			$(PYTHON) -m venv --system-site-packages $(VENV_BASE)/ansible; \
 		fi; \
 	fi
 
@@ -145,7 +145,8 @@ virtualenv_awx:
 			mkdir $(VENV_BASE); \
 		fi; \
 		if [ ! -d "$(VENV_BASE)/awx" ]; then \
-			$(PYTHON) -m venv $(VENV_BASE)/awx; \
+			$(PYTHON) -m venv --system-site-packages $(VENV_BASE)/awx; \
+			$(VENV_BASE)/awx/bin/pip install $(PIP_OPTIONS) --ignore-installed docutils==0.14; \
 		fi; \
 	fi
 
@@ -158,21 +159,17 @@ requirements_ansible: virtualenv_ansible
 	$(VENV_BASE)/ansible/bin/pip uninstall --yes -r requirements/requirements_ansible_uninstall.txt
 
 requirements_ansible_py3: virtualenv_ansible_py3
-	cat requirements/requirements_ansible.txt requirements/requirements_ansible_git.txt | $(VENV_BASE)/ansible3/bin/pip3 install $(PIP_OPTIONS) --no-binary $(SRC_ONLY_PKGS) --ignore-installed -r /dev/stdin
-	$(VENV_BASE)/ansible3/bin/pip3 install ansible  # can't inherit from system ansible, it's py2
-	$(VENV_BASE)/ansible3/bin/pip3 uninstall --yes -r requirements/requirements_ansible_uninstall.txt
+	if [[ "$(PIP_OPTIONS)" == *"--no-index"* ]]; then \
+	    cat requirements/requirements_ansible.txt requirements/requirements_ansible_local.txt | $(VENV_BASE)/ansible/bin/pip3 install $(PIP_OPTIONS) --ignore-installed -r /dev/stdin ; \
+	else \
+	    cat requirements/requirements_ansible.txt requirements/requirements_ansible_git.txt | $(VENV_BASE)/ansible/bin/pip3 install $(PIP_OPTIONS) --no-binary $(SRC_ONLY_PKGS) --ignore-installed -r /dev/stdin ; \
+	fi
+	$(VENV_BASE)/ansible/bin/pip3 uninstall --yes -r requirements/requirements_ansible_uninstall.txt
 
 requirements_ansible_dev:
 	if [ "$(VENV_BASE)" ]; then \
 		$(VENV_BASE)/ansible/bin/pip install pytest mock; \
 	fi
-
-requirements_isolated:
-	if [ ! -d "$(VENV_BASE)/awx" ]; then \
-		$(PYTHON) -m venv $(VENV_BASE)/awx; \
-	fi;
-	echo "include-system-site-packages = true" >> $(VENV_BASE)/awx/lib/python$(PYTHON_VERSION)/pyvenv.cfg
-	$(VENV_BASE)/awx/bin/pip install -r requirements/requirements_isolated.txt
 
 # Install third-party requirements needed for AWX's environment.
 requirements_awx: virtualenv_awx
@@ -189,7 +186,7 @@ requirements_awx_dev:
 
 requirements: requirements_ansible requirements_awx
 
-requirements_dev: requirements requirements_ansible_py3 requirements_awx_dev requirements_ansible_dev
+requirements_dev: requirements requirements_awx_dev requirements_ansible_dev
 
 requirements_test: requirements
 
@@ -221,7 +218,7 @@ init:
 	if [ "$(AWX_GROUP_QUEUES)" == "tower,thepentagon" ]; then \
 		$(MANAGEMENT_COMMAND) provision_instance --hostname=isolated; \
 		$(MANAGEMENT_COMMAND) register_queue --queuename='thepentagon' --hostnames=isolated --controller=tower; \
-		$(MANAGEMENT_COMMAND) generate_isolated_key > /awx_devel/awx/main/expect/authorized_keys; \
+		$(MANAGEMENT_COMMAND) generate_isolated_key > /awx_devel/awx/main/isolated/authorized_keys; \
 	fi;
 
 # Refresh development environment after pulling new code.
@@ -381,19 +378,11 @@ test:
 	PYTHONDONTWRITEBYTECODE=1 py.test -p no:cacheprovider -n auto $(TEST_DIRS)
 	awx-manage check_migrations --dry-run --check  -n 'vNNN_missing_migration_file'
 
-test_combined: test_ansible test
-
 test_unit:
 	@if [ "$(VENV_BASE)" ]; then \
 		. $(VENV_BASE)/awx/bin/activate; \
 	fi; \
 	py.test awx/main/tests/unit awx/conf/tests/unit awx/sso/tests/unit
-
-test_ansible:
-	@if [ "$(VENV_BASE)" ]; then \
-		. $(VENV_BASE)/ansible/bin/activate; \
-	fi; \
-	py.test awx/lib/tests -c awx/lib/tests/pytest.ini
 
 # Run all API unit tests with coverage enabled.
 test_coverage:
@@ -569,7 +558,6 @@ docker-isolated:
 	TAG=$(COMPOSE_TAG) DEV_DOCKER_TAG_BASE=$(DEV_DOCKER_TAG_BASE) docker-compose -f tools/docker-compose.yml -f tools/docker-isolated-override.yml create
 	docker start tools_awx_1
 	docker start tools_isolated_1
-	echo "__version__ = '`git describe --long | cut -d - -f 1-1`'" | docker exec -i tools_isolated_1 /bin/bash -c "cat > /venv/awx/lib/python$(PYTHON_VERSION)/site-packages/awx.py"
 	CURRENT_UID=$(shell id -u) TAG=$(COMPOSE_TAG) DEV_DOCKER_TAG_BASE=$(DEV_DOCKER_TAG_BASE) docker-compose -f tools/docker-compose.yml -f tools/docker-isolated-override.yml up
 
 # Docker Compose Development environment
@@ -578,6 +566,10 @@ docker-compose: docker-auth
 
 docker-compose-cluster: docker-auth
 	CURRENT_UID=$(shell id -u) TAG=$(COMPOSE_TAG) DEV_DOCKER_TAG_BASE=$(DEV_DOCKER_TAG_BASE) docker-compose -f tools/docker-compose-cluster.yml up
+
+docker-compose-credential-plugins: docker-auth
+	echo -e "\033[0;31mTo generate a CyberArk Conjur API key: docker exec -it tools_conjur_1 conjurctl account create quick-start\033[0m"
+	CURRENT_UID=$(shell id -u) TAG=$(COMPOSE_TAG) DEV_DOCKER_TAG_BASE=$(DEV_DOCKER_TAG_BASE) docker-compose -f tools/docker-compose.yml -f tools/docker-credential-plugins-override.yml up --no-recreate awx
 
 docker-compose-test: docker-auth
 	cd tools && CURRENT_UID=$(shell id -u) TAG=$(COMPOSE_TAG) DEV_DOCKER_TAG_BASE=$(DEV_DOCKER_TAG_BASE) docker-compose run --rm --service-ports awx /bin/bash
@@ -630,6 +622,9 @@ docker-compose-elk: docker-auth
 
 docker-compose-cluster-elk: docker-auth
 	TAG=$(COMPOSE_TAG) DEV_DOCKER_TAG_BASE=$(DEV_DOCKER_TAG_BASE) docker-compose -f tools/docker-compose-cluster.yml -f tools/elastic/docker-compose.logstash-link-cluster.yml -f tools/elastic/docker-compose.elastic-override.yml up --no-recreate
+
+prometheus:
+	docker run -u0 --net=tools_default --link=`docker ps | egrep -o "tools_awx(_run)?_([^ ]+)?"`:awxweb --volume `pwd`/tools/prometheus:/prometheus --name prometheus -d -p 0.0.0.0:9090:9090 prom/prometheus --web.enable-lifecycle --config.file=/prometheus/prometheus.yml
 
 minishift-dev:
 	ansible-playbook -i localhost, -e devtree_directory=$(CURDIR) tools/clusterdevel/start_minishift_dev.yml

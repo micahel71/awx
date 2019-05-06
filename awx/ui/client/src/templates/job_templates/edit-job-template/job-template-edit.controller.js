@@ -45,13 +45,21 @@ export default
                 id = $stateParams.job_template_id,
                 callback,
                 choicesCount = 0,
-                instance_group_url = defaultUrl + id + '/instance_groups';
+                instance_group_url = defaultUrl + id + '/instance_groups',
+                select2LoadDefer = [],
+                launchHasBeenEnabled = false;
 
             init();
             function init() {
 
                 CallbackHelpInit({ scope: $scope });
 
+                // To toggle notifications a user needs to have a read role on the JT
+                // _and_ have at least a notification template admin role on an org.
+                // If the user has gotten this far it's safe to say they have
+                // at least read access to the JT
+                $scope.sufficientRoleForNotifToggle = isNotificationAdmin;
+                $scope.sufficientRoleForNotif =  isNotificationAdmin || $scope.user_is_system_auditor;
                 $scope.playbook_options = null;
                 $scope.playbook = null;
                 $scope.mode = 'edit';
@@ -64,7 +72,6 @@ export default
                 $scope.skip_tag_options = [];
                 const virtualEnvs = ConfigData.custom_virtualenvs || [];
                 $scope.custom_virtualenvs_options = virtualEnvs;
-                $scope.isNotificationAdmin = isNotificationAdmin || false;
 
                 SurveyControllerInit({
                     scope: $scope,
@@ -168,47 +175,74 @@ export default
             };
 
             function sync_playbook_select2() {
-                CreateSelect2({
+                select2LoadDefer.push(CreateSelect2({
                     element:'#playbook-select',
                     multiple: false
-                });
+                }));
             }
 
             function sync_verbosity_select2() {
-                CreateSelect2({
+                select2LoadDefer.push(CreateSelect2({
                     element:'#job_template_verbosity',
                     multiple: false
-                });
+                }));
             }
 
             function jobTemplateLoadFinished(){
-                CreateSelect2({
+                select2LoadDefer.push(CreateSelect2({
                     element:'#job_template_job_type',
                     multiple: false
-                });
+                }));
 
-                CreateSelect2({
+                select2LoadDefer.push(CreateSelect2({
                     element:'#playbook-select',
                     multiple: false
-                });
+                }));
 
-                CreateSelect2({
+                select2LoadDefer.push(CreateSelect2({
                     element:'#job_template_job_tags',
                     multiple: true,
                     addNew: true
-                });
+                }));
 
-                CreateSelect2({
+                select2LoadDefer.push(CreateSelect2({
                     element:'#job_template_skip_tags',
                     multiple: true,
                     addNew: true
-                });
+                }));
 
-                CreateSelect2({
+                select2LoadDefer.push(CreateSelect2({
                     element: '#job_template_custom_virtualenv',
                     multiple: false,
                     opts: $scope.custom_virtualenvs_options
-                });
+                }));
+
+                if (!launchHasBeenEnabled) {
+                    $q.all(select2LoadDefer).then(() => {
+                        // updates based on lookups will initially set the form as dirty.
+                        // we need to set it as pristine when it contains the values given by the api
+                        // so that we can enable launching when the two are the same
+                        $scope.job_template_form.$setPristine();
+                        // this is used to set the overall form as dirty for the values
+                        // that don't actually set this internally (lookups, toggles and code mirrors).
+                        $scope.$watchCollection('multiCredential.selectedCredentials', (val, prevVal) => {
+                            if (!_.isEqual(val, prevVal)) {
+                                $scope.job_template_form.$setDirty();
+                            }
+                        });
+                        $scope.$watchGroup([
+                            'inventory',
+                            'project',
+                            'extra_vars',
+                            'diff_mode',
+                            'instance_groups'
+                        ], (val, prevVal) => {
+                            if (!_.isEqual(val, prevVal)) {
+                                $scope.job_template_form.$setDirty();
+                            }
+                        });
+                    });
+                }
             }
 
             $scope.toggleForm = function(key) {
@@ -259,8 +293,8 @@ export default
                     variable: 'extra_vars',
                     onChange: callback
                 });
-
                 jobTemplateLoadFinished();
+                launchHasBeenEnabled = true;
             });
 
             Wait('start');
@@ -458,12 +492,12 @@ export default
                 .map(i => ({id: i.id + "",
                     test: i.name}));
 
-            CreateSelect2({
+            select2LoadDefer.push(CreateSelect2({
                 element:'#job_template_labels',
                 multiple: true,
                 addNew: true,
                 opts: opts
-            });
+            }));
 
             $scope.$emit("choicesReady");
 

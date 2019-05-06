@@ -6,12 +6,23 @@ const templatesListTemplate = require('~features/templates/templatesList.view.ht
 export default {
     url: "/templates",
     name: 'projects.edit.templates',
+    searchPrefix: 'template',
     params: {
         template_search: {
             dynamic: true,
             value: {
-                type: 'workflow_job_template,job_template',
+                type: 'job_template',
+                order_by: 'name',
+                page_size: '20',
+                jobtemplate__project: null
             },
+        }
+    },
+    data: {
+        socket: {
+            groups: {
+                jobs: ['status_changed']
+            }
         }
     },
     ncyBreadcrumb: {

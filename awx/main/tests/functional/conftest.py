@@ -1,17 +1,13 @@
 # Python
 import pytest
 from unittest import mock
-import json
-import os
 import tempfile
 import shutil
 import urllib.parse
-from datetime import timedelta
 from unittest.mock import PropertyMock
 
 # Django
-from django.core.urlresolvers import resolve
-from django.utils import timezone
+from django.urls import resolve
 from django.contrib.auth.models import User
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db.backends.sqlite3.base import SQLiteCursorWrapper
@@ -20,7 +16,6 @@ from jsonbfield.fields import JSONField
 # AWX
 from awx.main.models.projects import Project
 from awx.main.models.ha import Instance
-from awx.main.models.fact import Fact
 
 from rest_framework.test import (
     APIRequestFactory,
@@ -251,6 +246,42 @@ def credentialtype_insights():
 
 
 @pytest.fixture
+def credentialtype_external():
+    external_type_inputs = {
+        'fields': [{
+            'id': 'url',
+            'label': 'Server URL',
+            'type': 'string',
+            'help_text': 'The server url.'
+        }, {
+            'id': 'token',
+            'label': 'Token',
+            'type': 'string',
+            'secret': True,
+            'help_text': 'An access token for the server.'
+        }],
+        'metadata': [{
+            'id': 'key',
+            'label': 'Key',
+            'type': 'string'
+        }, {
+            'id': 'version',
+            'label': 'Version',
+            'type': 'string'
+        }],
+        'required': ['url', 'token', 'key'],
+    }
+    external_type = CredentialType(
+        kind='external',
+        managed_by_tower=True,
+        name='External Service',
+        inputs=external_type_inputs
+    )
+    external_type.save()
+    return external_type
+
+
+@pytest.fixture
 def credential(credentialtype_aws):
     return Credential.objects.create(credential_type=credentialtype_aws, name='test-cred',
                                      inputs={'username': 'something', 'password': 'secret'})
@@ -291,6 +322,18 @@ def org_credential(organization, credentialtype_aws):
     return Credential.objects.create(credential_type=credentialtype_aws, name='test-cred',
                                      inputs={'username': 'something', 'password': 'secret'},
                                      organization=organization)
+
+
+@pytest.fixture
+def external_credential(credentialtype_external):
+    return Credential.objects.create(credential_type=credentialtype_external, name='external-cred',
+                                     inputs={'url': 'http://testhost.com', 'token': 'secret1'})
+
+
+@pytest.fixture
+def other_external_credential(credentialtype_external):
+    return Credential.objects.create(credential_type=credentialtype_external, name='other-external-cred',
+                                     inputs={'url': 'http://testhost.com', 'token': 'secret2'})
 
 
 @pytest.fixture
@@ -464,8 +507,9 @@ def group(inventory):
 
 @pytest.fixture
 def inventory_source(inventory):
+    # by making it ec2, the credential is not required
     return InventorySource.objects.create(name='single-inv-src',
-                                          inventory=inventory, source='gce')
+                                          inventory=inventory, source='ec2')
 
 
 @pytest.fixture
@@ -595,50 +639,6 @@ def head():
 @pytest.fixture
 def options():
     return _request('options')
-
-
-@pytest.fixture
-def fact_scans(group_factory, fact_ansible_json, fact_packages_json, fact_services_json):
-    group1 = group_factory('group-1')
-
-    def rf(fact_scans=1, timestamp_epoch=timezone.now()):
-        facts_json = {}
-        facts = []
-        module_names = ['ansible', 'services', 'packages']
-        timestamp_current = timestamp_epoch
-
-        facts_json['ansible'] = fact_ansible_json
-        facts_json['packages'] = fact_packages_json
-        facts_json['services'] = fact_services_json
-
-        for i in range(0, fact_scans):
-            for host in group1.hosts.all():
-                for module_name in module_names:
-                    facts.append(Fact.objects.create(host=host, timestamp=timestamp_current, module=module_name, facts=facts_json[module_name]))
-            timestamp_current += timedelta(days=1)
-        return facts
-    return rf
-
-
-def _fact_json(module_name):
-    current_dir = os.path.dirname(os.path.realpath(__file__))
-    with open('%s/%s.json' % (current_dir, module_name)) as f:
-        return json.load(f)
-
-
-@pytest.fixture
-def fact_ansible_json():
-    return _fact_json('ansible')
-
-
-@pytest.fixture
-def fact_packages_json():
-    return _fact_json('packages')
-
-
-@pytest.fixture
-def fact_services_json():
-    return _fact_json('services')
 
 
 @pytest.fixture

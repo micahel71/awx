@@ -100,6 +100,8 @@ class LoggedLoginView(auth_views.LoginView):
 
             return ret
         else:
+            if 'username' in self.request.POST:
+                logger.warn(smart_text(u"Login failed for user {} from {}".format(self.request.POST.get('username'),request.META.get('REMOTE_ADDR', None))))
             ret.status_code = 401
             return ret
 
@@ -980,7 +982,7 @@ class CopyAPIView(GenericAPIView):
             None, None, self.model, obj, request.user, create_kwargs=create_kwargs,
             copy_name=serializer.validated_data.get('name', '')
         )
-        if hasattr(new_obj, 'admin_role') and request.user not in new_obj.admin_role:
+        if hasattr(new_obj, 'admin_role') and request.user not in new_obj.admin_role.members.all():
             new_obj.admin_role.members.add(request.user)
         if sub_objs:
             permission_check_func = None

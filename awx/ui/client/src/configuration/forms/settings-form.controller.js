@@ -81,13 +81,13 @@ export default [
         $scope.configDataResolve = configDataResolve;
         $scope.formDefs = formDefs;
 
-        // check if it's auditor, show messageBar 
+        // check if it's auditor, show messageBar
         $scope.show_auditor_bar = false;
         if($rootScope.user_is_system_auditor && Store('show_auditor_bar') !== false) {
             $scope.show_auditor_bar = true;
         } else {
             $scope.show_auditor_bar = false;
-        }  
+        }
 
         var populateFromApi = function() {
             SettingsService.getCurrentValues()
@@ -100,6 +100,7 @@ export default [
                         .OAUTH2_PROVIDER.AUTHORIZATION_CODE_EXPIRE_SECONDS;
                     var currentKeys = _.keys(data);
                     $scope.requiredLogValues = {};
+                    $scope.originalSettings = data;
                     _.each(currentKeys, function(key) {
                         if(key === "LOG_AGGREGATOR_HOST") {
                             $scope.requiredLogValues.LOG_AGGREGATOR_HOST = data[key];
@@ -144,19 +145,6 @@ export default [
                     });
                     $scope.$broadcast('populated', data);
                 });
-                ConfigService.getConfig()
-                    .then(function(data) {
-                        $scope.ldap_auth = data.license_info.features.ldap;
-                        $scope.enterprise_auth = data.license_info.features.enterprise_auth;
-                    })
-                    .catch(function(data, status) {
-                        ProcessErrors($scope, data, status, null,
-                            {
-                                hdr: i18n._('Error'),
-                                msg: i18n._('There was an error getting config values: ') + status
-                            }
-                        );
-                    });
         };
 
         populateFromApi();
@@ -385,6 +373,7 @@ export default [
             var saveDeferred = $q.defer();
             clearApiErrors();
             Wait('start');
+            const payload = getFormPayload();
             SettingsService.patchConfiguration(getFormPayload())
                 .then(function(data) {
                     loginUpdate();
@@ -402,6 +391,12 @@ export default [
                             Toast-successIcon"></i>` +
                                 i18n._('Save Complete')
                     });
+                    if(payload.PENDO_TRACKING_STATE && payload.PENDO_TRACKING_STATE !== $scope.originalSettings.PENDO_TRACKING_STATE) {
+                        // Refreshing the page will pull in the new config and
+                        // properly set pendo up/shut it off depending on the
+                        // action
+                        location.reload();
+                    }
                 })
                 .catch(function(data) {
                     ProcessErrors($scope, data.data, data.status, formDefs[formTracker.getCurrent()],

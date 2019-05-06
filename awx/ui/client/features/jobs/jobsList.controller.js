@@ -17,7 +17,8 @@ function ListJobsController (
     ProcessErrors,
     Wait,
     Rest,
-    SearchBasePath
+    SearchBasePath,
+    $timeout
 ) {
     const vm = this || {};
     const [unifiedJob] = resolvedModels;
@@ -27,16 +28,77 @@ function ListJobsController (
     // smart-search
     const name = 'jobs';
     const iterator = 'job';
+    let paginateQuerySet = {};
 
     let launchModalOpen = false;
     let refreshAfterLaunchClose = false;
+    let pendingRefresh = false;
+    let refreshTimerRunning = false;
 
     vm.searchBasePath = SearchBasePath;
 
     vm.list = { iterator, name };
     vm.job_dataset = Dataset.data;
     vm.jobs = Dataset.data.results;
-    vm.querySet = $state.params.job_search;
+
+    $scope.$watch('$state.params', () => {
+        setToolbarSort();
+    }, true);
+
+    const toolbarSortDefault = {
+        label: `${strings.get('sort.FINISH_TIME_DESCENDING')}`,
+        value: '-finished'
+    };
+
+    function setToolbarSort () {
+        const orderByValue = _.get($state.params, 'job_search.order_by');
+        const sortValue = _.find(vm.toolbarSortOptions, (option) => option.value === orderByValue);
+        if (sortValue) {
+            vm.toolbarSortValue = sortValue;
+        } else {
+            vm.toolbarSortValue = toolbarSortDefault;
+        }
+    }
+
+    vm.toolbarSortOptions = [
+        { label: `${strings.get('sort.NAME_ASCENDING')}`, value: 'name' },
+        { label: `${strings.get('sort.NAME_DESCENDING')}`, value: '-name' },
+        { label: `${strings.get('sort.FINISH_TIME_ASCENDING')}`, value: 'finished' },
+        { label: `${strings.get('sort.START_TIME_ASCENDING')}`, value: 'started' },
+        { label: `${strings.get('sort.START_TIME_DESCENDING')}`, value: '-started' },
+        { label: `${strings.get('sort.LAUNCHED_BY_ASCENDING')}`, value: 'created_by__id' },
+        { label: `${strings.get('sort.LAUNCHED_BY_DESCENDING')}`, value: '-created_by__id' },
+        { label: `${strings.get('sort.PROJECT_ASCENDING')}`, value: 'unified_job_template__project__id' },
+        { label: `${strings.get('sort.PROJECT_DESCENDING')}`, value: '-unified_job_template__project__id' },
+        toolbarSortDefault
+    ];
+
+    vm.toolbarSortValue = toolbarSortDefault;
+
+    // Temporary hack to retrieve $scope.querySet from the paginate directive.
+    // Remove this event listener once the page and page_size params
+    // are represented in the url.
+    $scope.$on('updateDataset', (event, dataset, queryset) => {
+        paginateQuerySet = queryset;
+        vm.jobs = dataset.results;
+        vm.job_dataset = dataset;
+    });
+
+    vm.onToolbarSort = (sort) => {
+        vm.toolbarSortValue = sort;
+
+        const queryParams = Object.assign(
+            {},
+            $state.params.job_search,
+            paginateQuerySet,
+            { order_by: sort.value }
+        );
+
+        // Update URL with params
+        $state.go('.', {
+            job_search: queryParams
+        }, { notify: false, location: 'replace' });
+    };
 
     $scope.$watch('vm.job_dataset.count', () => {
         $scope.$emit('updateCount', vm.job_dataset.count, 'jobs');
@@ -44,7 +106,11 @@ function ListJobsController (
 
     $scope.$on('ws-jobs', () => {
         if (!launchModalOpen) {
-            refreshJobs();
+            if (!refreshTimerRunning) {
+                refreshJobs();
+            } else {
+                pendingRefresh = true;
+            }
         } else {
             refreshAfterLaunchClose = true;
         }
@@ -235,6 +301,15 @@ function ListJobsController (
                 vm.jobs = data.results;
                 vm.job_dataset = data;
             });
+        pendingRefresh = false;
+        refreshTimerRunning = true;
+        $timeout(() => {
+            if (pendingRefresh) {
+                refreshJobs();
+            } else {
+                refreshTimerRunning = false;
+            }
+        }, 5000);
     }
 
     vm.isCollapsed = true;
@@ -260,7 +335,8 @@ ListJobsController.$inject = [
     'ProcessErrors',
     'Wait',
     'Rest',
-    'SearchBasePath'
+    'SearchBasePath',
+    '$timeout'
 ];
 
 export default ListJobsController;

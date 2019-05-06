@@ -62,7 +62,6 @@ function InstanceGroupsStrings (BaseString) {
     ns.alert  = {
         MISSING_PARAMETER: t.s('Instance Group parameter is missing.'),
     };
-
 }
 
 InstanceGroupsStrings.$inject = ['BaseStringService'];

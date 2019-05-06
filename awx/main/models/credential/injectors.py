@@ -1,4 +1,5 @@
 import json
+import yaml
 import os
 import stat
 import tempfile
@@ -18,33 +19,39 @@ def gce(cred, env, private_data_dir):
     project = cred.get_input('project', default='')
     username = cred.get_input('username', default='')
 
-    env['GCE_EMAIL'] = username
-    env['GCE_PROJECT'] = project
+    if 'INVENTORY_UPDATE_ID' not in env:
+        env['GCE_EMAIL'] = username
+        env['GCE_PROJECT'] = project
     json_cred = {
         'type': 'service_account',
         'private_key': cred.get_input('ssh_key_data', default=''),
         'client_email': username,
-        'project_id': project
+        'project_id': project,
+        # need token uri for inventory plugins
+        # should this really be hard coded? Good question.
+        'token_uri': 'https://accounts.google.com/o/oauth2/token',
     }
+
     handle, path = tempfile.mkstemp(dir=private_data_dir)
     f = os.fdopen(handle, 'w')
-    json.dump(json_cred, f)
+    json.dump(json_cred, f, indent=2)
     f.close()
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     env['GCE_CREDENTIALS_FILE_PATH'] = path
+    return path
 
 
 def azure_rm(cred, env, private_data_dir):
     client = cred.get_input('client', default='')
     tenant = cred.get_input('tenant', default='')
 
+    env['AZURE_SUBSCRIPTION_ID'] = cred.get_input('subscription', default='')
+
     if len(client) and len(tenant):
         env['AZURE_CLIENT_ID'] = client
         env['AZURE_TENANT'] = tenant
         env['AZURE_SECRET'] = cred.get_input('secret', default='')
-        env['AZURE_SUBSCRIPTION_ID'] = cred.get_input('subscription', default='')
     else:
-        env['AZURE_SUBSCRIPTION_ID'] = cred.get_input('subscription', default='')
         env['AZURE_AD_USER'] = cred.get_input('username', default='')
         env['AZURE_PASSWORD'] = cred.get_input('password', default='')
 
@@ -57,3 +64,32 @@ def vmware(cred, env, private_data_dir):
     env['VMWARE_PASSWORD'] = cred.get_input('password', default='')
     env['VMWARE_HOST'] = cred.get_input('host', default='')
     env['VMWARE_VALIDATE_CERTS'] = str(settings.VMWARE_VALIDATE_CERTS)
+
+
+def _openstack_data(cred):
+    openstack_auth = dict(auth_url=cred.get_input('host', default=''),
+                          username=cred.get_input('username', default=''),
+                          password=cred.get_input('password', default=''),
+                          project_name=cred.get_input('project', default=''))
+    if cred.has_input('domain'):
+        openstack_auth['domain_name'] = cred.get_input('domain', default='')
+    verify_state = cred.get_input('verify_ssl', default=True)
+    openstack_data = {
+        'clouds': {
+            'devstack': {
+                'auth': openstack_auth,
+                'verify': verify_state,
+            },
+        },
+    }
+    return openstack_data
+
+
+def openstack(cred, env, private_data_dir):
+    handle, path = tempfile.mkstemp(dir=private_data_dir)
+    f = os.fdopen(handle, 'w')
+    openstack_data = _openstack_data(cred)
+    yaml.safe_dump(openstack_data, f, default_flow_style=False, allow_unicode=True)
+    f.close()
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    env['OS_CLIENT_CONFIG_FILE'] = path

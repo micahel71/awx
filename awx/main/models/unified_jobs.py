@@ -618,6 +618,7 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         choices=STATUS_CHOICES,
         default='new',
         editable=False,
+        db_index=True,
     )
     failed = models.BooleanField(
         default=False,
@@ -1226,6 +1227,23 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
     def pre_start(self, **kwargs):
         if not self.can_start:
             self.job_explanation = u'%s is not in a startable state: %s, expecting one of %s' % (self._meta.verbose_name, self.status, str(('new', 'waiting')))
+            self.save(update_fields=['job_explanation'])
+            return (False, None)
+
+        # verify that any associated credentials aren't missing required field data
+        missing_credential_inputs = []
+        for credential in self.credentials.all():
+            defined_fields = credential.credential_type.defined_fields
+            for required in credential.credential_type.inputs.get('required', []):
+                if required in defined_fields and not credential.has_input(required):
+                    missing_credential_inputs.append(required)
+
+        if missing_credential_inputs:
+            self.job_explanation = '{} cannot start because Credential {} does not provide one or more required fields ({}).'.format(
+                self._meta.verbose_name.title(),
+                credential.name,
+                ', '.join(sorted(missing_credential_inputs))
+            )
             self.save(update_fields=['job_explanation'])
             return (False, None)
 

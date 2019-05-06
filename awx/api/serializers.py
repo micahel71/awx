@@ -6,7 +6,6 @@ import copy
 import json
 import logging
 import re
-import urllib.parse
 from collections import OrderedDict
 from datetime import timedelta
 
@@ -16,6 +15,7 @@ from oauthlib.common import generate_token
 
 # Django
 from django.conf import settings
+from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.models import User
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ObjectDoesNotExist, ValidationError as DjangoValidationError
@@ -46,15 +46,15 @@ from awx.main.constants import (
     CENSOR_VALUE,
 )
 from awx.main.models import (
-    ActivityStream, AdHocCommand, AdHocCommandEvent, Credential,
-    CredentialType, CustomInventoryScript, Fact, Group, Host, Instance,
+    ActivityStream, AdHocCommand, AdHocCommandEvent, Credential, CredentialInputSource,
+    CredentialType, CustomInventoryScript, Group, Host, Instance,
     InstanceGroup, Inventory, InventorySource, InventoryUpdate,
     InventoryUpdateEvent, Job, JobEvent, JobHostSummary, JobLaunchConfig,
-    JobTemplate, Label, Notification, NotificationTemplate, OAuth2AccessToken,
-    OAuth2Application, Organization, Project, ProjectUpdate,
-    ProjectUpdateEvent, RefreshToken, Role, Schedule, SystemJob,
-    SystemJobEvent, SystemJobTemplate, Team, UnifiedJob, UnifiedJobTemplate,
-    UserSessionMembership, V1Credential, WorkflowJob, WorkflowJobNode,
+    JobTemplate, Label, Notification, NotificationTemplate,
+    OAuth2AccessToken, OAuth2Application, Organization, Project,
+    ProjectUpdate, ProjectUpdateEvent, RefreshToken, Role, Schedule,
+    SystemJob, SystemJobEvent, SystemJobTemplate, Team, UnifiedJob,
+    UnifiedJobTemplate, V1Credential, WorkflowJob, WorkflowJobNode,
     WorkflowJobTemplate, WorkflowJobTemplateNode, StdoutMaxBytesExceeded
 )
 from awx.main.models.base import VERBOSITY_CHOICES, NEW_JOB_TYPE_CHOICES
@@ -63,7 +63,7 @@ from awx.main.models.rbac import (
 )
 from awx.main.fields import ImplicitRoleField, JSONBField
 from awx.main.utils import (
-    get_type_for_model, get_model_for_type, timestamp_apiformat,
+    get_type_for_model, get_model_for_type,
     camelcase_to_underscore, getattrd, parse_yaml_or_json,
     has_model_field_prefetched, extract_ansible_vars, encrypt_dict,
     prefetch_page_capabilities, get_external_account)
@@ -72,7 +72,6 @@ from awx.main.redact import UriCleaner, REPLACE_STR
 
 from awx.main.validators import vars_validate_or_raise
 
-from awx.conf.license import feature_enabled, LicenseForbids
 from awx.api.versioning import reverse, get_request_version
 from awx.api.fields import (BooleanNullField, CharNullField, ChoiceNullField,
                             VerbatimField, DeprecatedCredentialField)
@@ -133,6 +132,8 @@ SUMMARIZABLE_FK_FIELDS = {
     'notification_template': DEFAULT_SUMMARY_FIELDS,
     'instance_group': {'id', 'name', 'controller_id'},
     'insights_credential': DEFAULT_SUMMARY_FIELDS,
+    'source_credential': DEFAULT_SUMMARY_FIELDS + ('kind', 'cloud', 'credential_type_id'),
+    'target_credential': DEFAULT_SUMMARY_FIELDS + ('kind', 'cloud', 'credential_type_id'),
 }
 
 
@@ -641,18 +642,6 @@ class EmptySerializer(serializers.Serializer):
     pass
 
 
-class BaseFactSerializer(BaseSerializer, metaclass=BaseSerializerMetaclass):
-
-    def get_fields(self):
-        ret = super(BaseFactSerializer, self).get_fields()
-        if 'module' in ret:
-            # TODO: the values_list may pull in a LOT of entries before the distinct is called
-            modules = Fact.objects.all().values_list('module', flat=True).distinct()
-            choices = [(o, o.title()) for o in modules]
-            ret['module'] = serializers.ChoiceField(choices=choices, read_only=True, required=False)
-        return ret
-
-
 class UnifiedJobTemplateSerializer(BaseSerializer):
     # As a base serializer, the capabilities prefetch is not used directly
     _capabilities_prefetch = [
@@ -904,7 +893,7 @@ class UserSerializer(BaseSerializer):
 
     def get_validation_exclusions(self, obj=None):
         ret = super(UserSerializer, self).get_validation_exclusions(obj)
-        ret.append('password')
+        ret.extend(['password', 'is_system_auditor'])
         return ret
 
     def validate_password(self, value):
@@ -915,7 +904,7 @@ class UserSerializer(BaseSerializer):
     def _update_password(self, obj, new_password):
         # For now we're not raising an error, just not saving password for
         # users managed by LDAP who already have an unusable password set.
-        if getattr(settings, 'AUTH_LDAP_SERVER_URI', None) and feature_enabled('ldap'):
+        if getattr(settings, 'AUTH_LDAP_SERVER_URI', None):
             try:
                 if obj.pk and obj.profile.ldap_dn and not obj.has_usable_password():
                     new_password = None
@@ -933,8 +922,12 @@ class UserSerializer(BaseSerializer):
         if new_password:
             obj.set_password(new_password)
             obj.save(update_fields=['password'])
-            if self.context['request'].user != obj:
-                UserSessionMembership.clear_session_for_user(obj)
+
+            # Cycle the session key, but if the requesting user is the same
+            # as the modified user then inject a session key derived from
+            # the updated user to prevent logout. This is the logic used by
+            # the Django admin's own user_change_password view.
+            update_session_auth_hash(self.context['request'], obj)
         elif not obj.password:
             obj.set_unusable_password()
             obj.save(update_fields=['password'])
@@ -944,14 +937,20 @@ class UserSerializer(BaseSerializer):
 
     def create(self, validated_data):
         new_password = validated_data.pop('password', None)
+        is_system_auditor = validated_data.pop('is_system_auditor', None)
         obj = super(UserSerializer, self).create(validated_data)
         self._update_password(obj, new_password)
+        if is_system_auditor is not None:
+            obj.is_system_auditor = is_system_auditor
         return obj
 
     def update(self, obj, validated_data):
         new_password = validated_data.pop('password', None)
+        is_system_auditor = validated_data.pop('is_system_auditor', None)
         obj = super(UserSerializer, self).update(obj, validated_data)
         self._update_password(obj, new_password)
+        if is_system_auditor is not None:
+            obj.is_system_auditor = is_system_auditor
         return obj
 
     def get_related(self, obj):
@@ -972,7 +971,7 @@ class UserSerializer(BaseSerializer):
         return res
 
     def _validate_ldap_managed_field(self, value, field_name):
-        if not getattr(settings, 'AUTH_LDAP_SERVER_URI', None) or not feature_enabled('ldap'):
+        if not getattr(settings, 'AUTH_LDAP_SERVER_URI', None):
             return value
         try:
             is_ldap_user = bool(self.instance and self.instance.profile.ldap_dn)
@@ -1001,6 +1000,16 @@ class UserSerializer(BaseSerializer):
 
     def validate_is_superuser(self, value):
         return self._validate_ldap_managed_field(value, 'is_superuser')
+
+
+class UserActivityStreamSerializer(UserSerializer):
+    """Changes to system auditor status are shown as separate entries,
+    so by excluding it from fields here we avoid duplication, which
+    would carry some unintended consequences.
+    """
+    class Meta:
+        model = User
+        fields = ('*', '-is_system_auditor')
 
 
 class BaseOAuth2TokenSerializer(BaseSerializer):
@@ -1066,7 +1075,7 @@ class BaseOAuth2TokenSerializer(BaseSerializer):
             if word not in self.ALLOWED_SCOPES:
                 return False
         return True
-            
+
     def validate_scope(self, value):
         if not self._is_valid_scope(value):
             raise serializers.ValidationError(_(
@@ -1229,7 +1238,7 @@ class OrganizationSerializer(BaseSerializer):
 
     class Meta:
         model = Organization
-        fields = ('*', 'custom_virtualenv',)
+        fields = ('*', 'max_hosts', 'custom_virtualenv',)
 
     def get_related(self, obj):
         res = super(OrganizationSerializer, self).get_related(obj)
@@ -1264,6 +1273,20 @@ class OrganizationSerializer(BaseSerializer):
             else:
                 summary_dict['related_field_counts'] = counts_dict[obj.id]
         return summary_dict
+
+    def validate(self, attrs):
+        obj = self.instance
+        view = self.context['view']
+
+        obj_limit = getattr(obj, 'max_hosts', None)
+        api_limit = attrs.get('max_hosts')
+
+        if not view.request.user.is_superuser:
+            if api_limit is not None and api_limit != obj_limit:
+                # Only allow superusers to edit the max_hosts field
+                raise serializers.ValidationError(_('Cannot change max_hosts.'))
+
+        return super(OrganizationSerializer, self).validate(attrs)
 
 
 class ProjectOptionsSerializer(BaseSerializer):
@@ -1645,7 +1668,6 @@ class HostSerializer(BaseSerializerWithVariables):
             smart_inventories = self.reverse('api:host_smart_inventories_list', kwargs={'pk': obj.pk}),
             ad_hoc_commands = self.reverse('api:host_ad_hoc_commands_list', kwargs={'pk': obj.pk}),
             ad_hoc_command_events = self.reverse('api:host_ad_hoc_command_events_list', kwargs={'pk': obj.pk}),
-            fact_versions = self.reverse('api:host_fact_versions_list', kwargs={'pk': obj.pk}),
         ))
         if self.version > 1:
             res['insights'] = self.reverse('api:host_insights', kwargs={'pk': obj.pk})
@@ -1936,7 +1958,7 @@ class InventorySourceOptionsSerializer(BaseSerializer):
     class Meta:
         fields = ('*', 'source', 'source_path', 'source_script', 'source_vars', 'credential',
                   'source_regions', 'instance_filters', 'group_by', 'overwrite', 'overwrite_vars',
-                  'timeout', 'verbosity')
+                  'custom_virtualenv', 'timeout', 'verbosity')
 
     def get_related(self, obj):
         res = super(InventorySourceOptionsSerializer, self).get_related(obj)
@@ -2202,8 +2224,8 @@ class InventoryUpdateSerializer(UnifiedJobSerializer, InventorySourceOptionsSeri
 
     class Meta:
         model = InventoryUpdate
-        fields = ('*', 'inventory', 'inventory_source', 'license_error', 'source_project_update',
-                  'custom_virtualenv', '-controller_node',)
+        fields = ('*', 'inventory', 'inventory_source', 'license_error', 'org_host_limit_error',
+                  'source_project_update', 'custom_virtualenv', '-controller_node',)
 
     def get_related(self, obj):
         res = super(InventoryUpdateSerializer, self).get_related(obj)
@@ -2473,7 +2495,7 @@ class CredentialTypeSerializer(BaseSerializer):
 
     class Meta:
         model = CredentialType
-        fields = ('*', 'kind', 'name', 'managed_by_tower', 'inputs',
+        fields = ('*', 'kind', 'namespace', 'name', 'managed_by_tower', 'inputs',
                   'injectors')
 
     def validate(self, attrs):
@@ -2568,7 +2590,7 @@ class V2CredentialFields(BaseSerializer, metaclass=BaseSerializerMetaclass):
 
 
 class CredentialSerializer(BaseSerializer):
-    show_capabilities = ['edit', 'delete', 'copy']
+    show_capabilities = ['edit', 'delete', 'copy', 'use']
     capabilities_prefetch = ['admin', 'use']
 
     class Meta:
@@ -2615,6 +2637,7 @@ class CredentialSerializer(BaseSerializer):
         ))
         if self.version > 1:
             res['copy'] = self.reverse('api:credential_copy', kwargs={'pk': obj.pk})
+            res['input_sources'] = self.reverse('api:credential_input_source_sublist', kwargs={'pk': obj.pk})
 
         # TODO: remove when API v1 is removed
         if self.version > 1:
@@ -2799,6 +2822,32 @@ class CredentialSerializerCreate(CredentialSerializer):
             credential.admin_role.parents.add(team.admin_role)
             credential.use_role.parents.add(team.member_role)
         return credential
+
+
+class CredentialInputSourceSerializer(BaseSerializer):
+    show_capabilities = ['delete']
+
+    class Meta:
+        model = CredentialInputSource
+        fields = (
+            '*',
+            'input_field_name',
+            'metadata',
+            'target_credential',
+            'source_credential',
+            '-name',
+        )
+        extra_kwargs = {
+            'input_field_name': {'required': True},
+            'target_credential': {'required': True},
+            'source_credential': {'required': True},
+        }
+
+    def get_related(self, obj):
+        res = super(CredentialInputSourceSerializer, self).get_related(obj)
+        res['source_credential'] = obj.source_credential.get_absolute_url(request=self.context.get('request'))
+        res['target_credential'] = obj.target_credential.get_absolute_url(request=self.context.get('request'))
+        return res
 
 
 class UserCredentialSerializerCreate(CredentialSerializerCreate):
@@ -3122,12 +3171,6 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
     def validate_extra_vars(self, value):
         return vars_validate_or_raise(value)
 
-    def validate_job_slice_count(self, value):
-        if value > 1 and not feature_enabled('workflows'):
-            raise LicenseForbids({'job_slice_count': [_(
-                "Job slicing is a workflows-based feature and your license does not allow use of workflows."
-            )]})
-        return value
 
     def get_summary_fields(self, obj):
         summary_fields = super(JobTemplateSerializer, self).get_summary_fields(obj)
@@ -3186,41 +3229,12 @@ class JobTemplateWithSpecSerializer(JobTemplateSerializer):
 class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
 
     passwords_needed_to_start = serializers.ReadOnlyField()
-    ask_diff_mode_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_variables_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_limit_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_skip_tags_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_tags_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_job_type_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_verbosity_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_inventory_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
-    ask_credential_on_launch = serializers.BooleanField(
-        read_only=True,
-        help_text=_('This field has been deprecated and will be removed in a future release'))
     artifacts = serializers.SerializerMethodField()
 
     class Meta:
         model = Job
-        fields = ('*', 'job_template', 'passwords_needed_to_start', 'ask_diff_mode_on_launch',
-                  'ask_variables_on_launch', 'ask_limit_on_launch', 'ask_tags_on_launch', 'ask_skip_tags_on_launch',
-                  'ask_job_type_on_launch', 'ask_verbosity_on_launch', 'ask_inventory_on_launch',
-                  'ask_credential_on_launch', 'allow_simultaneous', 'artifacts', 'scm_revision',
+        fields = ('*', 'job_template', 'passwords_needed_to_start',
+                  'allow_simultaneous', 'artifacts', 'scm_revision',
                   'instance_group', 'diff_mode', 'job_slice_number', 'job_slice_count')
 
     def get_related(self, obj):
@@ -4007,7 +4021,7 @@ class WorkflowJobTemplateNodeDetailSerializer(WorkflowJobTemplateNodeSerializer)
     Influence the api browser sample data to not include workflow_job_template
     when editing a WorkflowNode.
 
-    Note: I was not able to accomplish this trough the use of extra_kwargs.
+    Note: I was not able to accomplish this through the use of extra_kwargs.
     Maybe something to do with workflow_job_template being a relational field?
     '''
     def build_relational_field(self, field_name, relation_info):
@@ -4038,7 +4052,8 @@ class JobHostSummarySerializer(BaseSerializer):
     class Meta:
         model = JobHostSummary
         fields = ('*', '-name', '-description', 'job', 'host', 'host_name', 'changed',
-                  'dark', 'failures', 'ok', 'processed', 'skipped', 'failed')
+                  'dark', 'failures', 'ok', 'processed', 'skipped', 'failed',
+                  'ignored', 'rescued')
 
     def get_related(self, obj):
         res = super(JobHostSummarySerializer, self).get_related(obj)
@@ -4080,8 +4095,7 @@ class JobEventSerializer(BaseSerializer):
         ))
         if obj.parent_id:
             res['parent'] = self.reverse('api:job_event_detail', kwargs={'pk': obj.parent_id})
-        if obj.children.exists():
-            res['children'] = self.reverse('api:job_event_children_list', kwargs={'pk': obj.pk})
+        res['children'] = self.reverse('api:job_event_children_list', kwargs={'pk': obj.pk})
         if obj.host_id:
             res['host'] = self.reverse('api:host_detail', kwargs={'pk': obj.host_id})
         if obj.hosts.exists():
@@ -4495,8 +4509,8 @@ class WorkflowJobLaunchSerializer(BaseSerializer):
         fields = ('ask_inventory_on_launch', 'can_start_without_user_input', 'defaults', 'extra_vars',
                   'inventory', 'survey_enabled', 'variables_needed_to_start',
                   'node_templates_missing', 'node_prompts_rejected',
-                  'workflow_job_template_data', 'survey_enabled')
-        read_only_fields = ('ask_inventory_on_launch',)
+                  'workflow_job_template_data', 'survey_enabled', 'ask_variables_on_launch')
+        read_only_fields = ('ask_inventory_on_launch', 'ask_variables_on_launch')
 
     def get_survey_enabled(self, obj):
         if obj:
@@ -4603,12 +4617,15 @@ class NotificationTemplateSerializer(BaseSerializer):
             object_actual = self.context['view'].get_object()
         else:
             object_actual = None
-        for field in notification_class.init_parameters:
+        for field, params in notification_class.init_parameters.items():
             if field not in attrs['notification_configuration']:
-                missing_fields.append(field)
-                continue
+                if 'default' in params:
+                    attrs['notification_configuration'][field] = params['default']
+                else:
+                    missing_fields.append(field)
+                    continue
             field_val = attrs['notification_configuration'][field]
-            field_type = notification_class.init_parameters[field]['type']
+            field_type = params['type']
             expected_types = self.type_map[field_type]
             if not type(field_val) in expected_types:
                 incorrect_type_fields.append((field, field_type))
@@ -4836,6 +4853,15 @@ class InstanceGroupSerializer(BaseSerializer):
         read_only=True
     )
     instances = serializers.SerializerMethodField()
+    is_controller = serializers.BooleanField(
+        help_text=_('Indicates whether instance group controls any other group'),
+        read_only=True
+    )
+    is_isolated = serializers.BooleanField(
+        help_text=_('Indicates whether instances in this group are isolated.'
+                    'Isolated groups have a designated controller group.'),
+        read_only=True
+    )
     # NOTE: help_text is duplicated from field definitions, no obvious way of
     # both defining field details here and also getting the field's help_text
     policy_instance_percentage = serializers.IntegerField(
@@ -4861,7 +4887,7 @@ class InstanceGroupSerializer(BaseSerializer):
         fields = ("id", "type", "url", "related", "name", "created", "modified",
                   "capacity", "committed_capacity", "consumed_capacity",
                   "percent_capacity_remaining", "jobs_running", "jobs_total",
-                  "instances", "controller",
+                  "instances", "controller", "is_controller", "is_isolated",
                   "policy_instance_percentage", "policy_instance_minimum", "policy_instance_list")
 
     def get_related(self, obj):
@@ -5055,6 +5081,17 @@ class ActivityStreamSerializer(BaseSerializer):
                                     if fval is not None:
                                         job_template_item[field] = fval
                                 summary_fields['job_template'].append(job_template_item)
+                        if fk == 'workflow_job_template_node':
+                            summary_fields['workflow_job_template'] = []
+                            workflow_job_template_item = {}
+                            workflow_job_template_fields = SUMMARIZABLE_FK_FIELDS['workflow_job_template']
+                            workflow_job_template = getattr(thisItem, 'workflow_job_template', None)
+                            if workflow_job_template is not None:
+                                for field in workflow_job_template_fields:
+                                    fval = getattr(workflow_job_template, field, None)
+                                    if fval is not None:
+                                        workflow_job_template_item[field] = fval
+                                summary_fields['workflow_job_template'].append(workflow_job_template_item)
                         if fk == 'schedule':
                             unified_job_template = getattr(thisItem, 'unified_job_template', None)
                             if unified_job_template is not None:
@@ -5080,44 +5117,3 @@ class ActivityStreamSerializer(BaseSerializer):
             summary_fields['setting'] = [obj.setting]
         return summary_fields
 
-
-class FactVersionSerializer(BaseFactSerializer):
-
-    class Meta:
-        model = Fact
-        fields = ('related', 'module', 'timestamp')
-        read_only_fields = ('*',)
-
-    def get_related(self, obj):
-        res = super(FactVersionSerializer, self).get_related(obj)
-        params = {
-            'datetime': timestamp_apiformat(obj.timestamp),
-            'module': obj.module,
-        }
-        res['fact_view'] = '%s?%s' % (
-            reverse('api:host_fact_compare_view', kwargs={'pk': obj.host.pk}, request=self.context.get('request')),
-            urllib.parse.urlencode(params)
-        )
-        return res
-
-
-class FactSerializer(BaseFactSerializer):
-
-    class Meta:
-        model = Fact
-        # TODO: Consider adding in host to the fields list ?
-        fields = ('related', 'timestamp', 'module', 'facts', 'id', 'summary_fields', 'host')
-        read_only_fields = ('*',)
-
-    def get_related(self, obj):
-        res = super(FactSerializer, self).get_related(obj)
-        res['host'] = obj.host.get_absolute_url(self.context.get('request'))
-        return res
-
-    def to_representation(self, obj):
-        ret = super(FactSerializer, self).to_representation(obj)
-        if obj is None:
-            return ret
-        if 'facts' in ret and isinstance(ret['facts'], str):
-            ret['facts'] = json.loads(ret['facts'])
-        return ret

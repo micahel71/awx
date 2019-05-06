@@ -16,7 +16,8 @@ SCHEDULEABLE_PROVIDERS = CLOUD_PROVIDERS + ('custom', 'scm',)
 PRIVILEGE_ESCALATION_METHODS = [
     ('sudo', _('Sudo')), ('su', _('Su')), ('pbrun', _('Pbrun')), ('pfexec', _('Pfexec')),
     ('dzdo', _('DZDO')), ('pmrun', _('Pmrun')), ('runas', _('Runas')),
-    ('enable', _('Enable')), ('doas', _('Doas')),
+    ('enable', _('Enable')), ('doas', _('Doas')), ('ksu', _('Ksu')),
+    ('machinectl', _('Machinectl')), ('sesu', _('Sesu')),
 ]
 CHOICES_PRIVILEGE_ESCALATION_METHODS = [('', _('None'))] + PRIVILEGE_ESCALATION_METHODS
 ANSI_SGR_PATTERN = re.compile(r'\x1b\[[0-9;]*m')
@@ -24,7 +25,9 @@ STANDARD_INVENTORY_UPDATE_ENV = {
     # Failure to parse inventory should always be fatal
     'ANSIBLE_INVENTORY_UNPARSED_FAILED': 'True',
     # Always use the --export option for ansible-inventory
-    'ANSIBLE_INVENTORY_EXPORT': 'True'
+    'ANSIBLE_INVENTORY_EXPORT': 'True',
+    # Redirecting output to stderr allows JSON parsing to still work with -vvv
+    'ANSIBLE_VERBOSE_TO_STDERR': 'True'
 }
 CAN_CANCEL = ('new', 'pending', 'waiting', 'running')
 ACTIVE_STATES = CAN_CANCEL
@@ -34,6 +37,6 @@ ENV_BLACKLIST = frozenset((
     'INVENTORY_ID', 'INVENTORY_SOURCE_ID', 'INVENTORY_UPDATE_ID',
     'AD_HOC_COMMAND_ID', 'REST_API_URL', 'REST_API_TOKEN', 'MAX_EVENT_RES',
     'CALLBACK_QUEUE', 'CALLBACK_CONNECTION', 'CACHE',
-    'JOB_CALLBACK_DEBUG', 'INVENTORY_HOSTVARS', 'FACT_QUEUE',
+    'JOB_CALLBACK_DEBUG', 'INVENTORY_HOSTVARS',
     'AWX_HOST', 'PROJECT_REVISION'
 ))

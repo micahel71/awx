@@ -92,6 +92,14 @@ function ApplicationsRun ($stateExtender, strings) {
             }
         },
         searchPrefix: 'application',
+        params: {
+            application_search: {
+                value: {
+                    page_size: 10,
+                    order_by: 'name'
+                }
+            }
+        },
         resolve: {
             resolvedModels: [
                 'ApplicationModel',
@@ -291,8 +299,8 @@ function ApplicationsRun ($stateExtender, strings) {
         params: {
             user_search: {
                 value: {
-                    order_by: 'user',
-                    page_size: 20
+                    order_by: 'user__username',
+                    page_size: 10
                 },
                 dynamic: true
             }

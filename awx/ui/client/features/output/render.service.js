@@ -35,7 +35,7 @@ const hasAnsi = input => re.test(input);
 
 let $scope;
 
-function JobRenderService ($q, $compile, $sce, $window) {
+function JobRenderService ($q, $compile, $sce, $window, strings) {
     this.init = (_$scope_, { toggles }) => {
         $scope = _$scope_;
         this.setScope();
@@ -132,7 +132,7 @@ function JobRenderService ($q, $compile, $sce, $window) {
             return { html: '', count: 0 };
         }
 
-        const html = this.buildRowHTML(this.records[uuid]);
+        const html = this.buildRowHTML(this.records[uuid], null, null, event);
         const count = 1;
 
         return { html, count };
@@ -193,7 +193,7 @@ function JobRenderService ($q, $compile, $sce, $window) {
             return { html: '', count: 0 };
         }
 
-        const html = this.buildRowHTML(this.records[uuid]);
+        const html = this.buildRowHTML(this.records[uuid], null, null, event);
         const count = 1;
 
         return { html, count };
@@ -204,7 +204,7 @@ function JobRenderService ($q, $compile, $sce, $window) {
             return { html: '', count: 0 };
         }
 
-        if (event.uuid && this.records[event.uuid]) {
+        if (event.uuid && this.records[event.uuid] && !this.records[event.uuid]._isIncomplete) {
             return { html: '', count: 0 };
         }
 
@@ -226,10 +226,10 @@ function JobRenderService ($q, $compile, $sce, $window) {
             const line = lines[i];
             const isLastLine = i === lines.length - 1;
 
-            let row = this.buildRowHTML(record, ln, line);
+            let row = this.buildRowHTML(record, ln, line, event);
 
             if (record && record.isTruncated && isLastLine) {
-                row += this.buildRowHTML(record);
+                row += this.buildRowHTML(record, null, null, event);
                 count++;
             }
 
@@ -272,6 +272,9 @@ function JobRenderService ($q, $compile, $sce, $window) {
             isClickable = true;
         }
 
+        const children = (this.records[event.uuid] && this.records[event.uuid].children)
+            ? this.records[event.uuid].children : [];
+
         const record = {
             isClickable,
             id: event.id,
@@ -285,6 +288,7 @@ function JobRenderService ($q, $compile, $sce, $window) {
             lineCount: lines.length,
             isCollapsed: this.state.collapseAll,
             counters: [event.counter],
+            children
         };
 
         if (event.parent_uuid) {
@@ -307,12 +311,18 @@ function JobRenderService ($q, $compile, $sce, $window) {
 
             if (event.parent_uuid) {
                 if (this.records[event.parent_uuid]) {
-                    if (this.records[event.parent_uuid].children &&
-                        !this.records[event.parent_uuid].children.includes(event.uuid)) {
-                        this.records[event.parent_uuid].children.push(event.uuid);
+                    if (this.records[event.parent_uuid].children) {
+                        if (!this.records[event.parent_uuid].children.includes(event.uuid)) {
+                            this.records[event.parent_uuid].children.push(event.uuid);
+                        }
                     } else {
                         this.records[event.parent_uuid].children = [event.uuid];
                     }
+                } else {
+                    this.records[event.parent_uuid] = {
+                        _isIncomplete: true,
+                        children: [event.uuid]
+                    };
                 }
             }
         }
@@ -340,14 +350,14 @@ function JobRenderService ($q, $compile, $sce, $window) {
         return list;
     };
 
-    this.buildRowHTML = (record, ln, content) => {
+    this.buildRowHTML = (record, ln, content, event) => {
         let id = '';
         let icon = '';
         let timestamp = '';
         let tdToggle = '';
         let tdEvent = '';
         let classList = '';
-        let directives = '';
+        let directives = `aw-tool-tip="${this.createToolTip(event, record)}" aw-tip-placement="top"`;
 
         if (record.isMissing) {
             return `<div id="${record.uuid}" class="at-Stdout-row">
@@ -397,22 +407,33 @@ function JobRenderService ($q, $compile, $sce, $window) {
 
         if (record && record.isCollapsed) {
             if (record.level === 3 || record.level === 0) {
-                classList += ' hidden';
+                classList += ' at-Stdout-row--hidden';
             }
         }
 
         if (record && record.isClickable) {
             classList += ' at-Stdout-row--clickable';
-            directives = `ng-click="vm.showHostDetails('${record.id}', '${record.uuid}')"`;
+            directives += ` ng-click="vm.showHostDetails('${record.id}', '${record.uuid}')"
+            `;
         }
-
         return `
             <div id="${id}" class="at-Stdout-row ${classList}" ${directives}>
                 ${tdToggle}
                 <div class="at-Stdout-line">${ln}</div>
                 <div class="at-Stdout-event"><span ng-non-bindable>${content}</span></div>
                 <div class="at-Stdout-time">${timestamp}</div>
-            </div>`;
+            </div>
+        `;
+    };
+
+    this.createToolTip = (event, record) => {
+        const status = strings.get('tooltips.HOST_STATUS');
+        const eventID = strings.get('tooltips.EVENT_ID');
+        const clickForDetails = strings.get('tooltips.DETAILS');
+
+        return record.isClickable
+            ? `${status} ${event.event_display}<br />${eventID} ${event.id}<br />${clickForDetails}`
+            : `${status} ${event.event_display}<br />${eventID} ${event.id}`;
     };
 
     this.getTimestamp = created => {
@@ -608,6 +629,6 @@ function JobRenderService ($q, $compile, $sce, $window) {
     this.getCapacity = () => OUTPUT_EVENT_LIMIT - (this.getTailCounter() - this.getHeadCounter());
 }
 
-JobRenderService.$inject = ['$q', '$compile', '$sce', '$window'];
+JobRenderService.$inject = ['$q', '$compile', '$sce', '$window', 'OutputStrings'];
 
 export default JobRenderService;

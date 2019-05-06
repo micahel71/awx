@@ -2,7 +2,6 @@
 # All Rights Reserved.
 
 # Python
-import base64
 import json
 import yaml
 import logging
@@ -16,7 +15,6 @@ import contextlib
 import tempfile
 import psutil
 from functools import reduce, wraps
-from io import StringIO
 
 from decimal import Decimal
 
@@ -42,12 +40,12 @@ __all__ = ['get_object_or_400', 'camelcase_to_underscore', 'memoize', 'memoize_d
            'copy_m2m_relationships', 'prefetch_page_capabilities', 'to_python_boolean',
            'ignore_inventory_computed_fields', 'ignore_inventory_group_removal',
            '_inventory_updates', 'get_pk_from_dict', 'getattrd', 'getattr_dne', 'NoDefaultProvided',
-           'get_current_apps', 'set_current_apps', 'OutputEventFilter', 'OutputVerboseFilter',
+           'get_current_apps', 'set_current_apps',
            'extract_ansible_vars', 'get_search_fields', 'get_system_task_capacity', 'get_cpu_capacity', 'get_mem_capacity',
            'wrap_args_with_proot', 'build_proot_temp_dir', 'check_proot_installed', 'model_to_dict',
-           'model_instance_diff', 'timestamp_apiformat', 'parse_yaml_or_json', 'RequireDebugTrueOrTest',
+           'model_instance_diff', 'parse_yaml_or_json', 'RequireDebugTrueOrTest',
            'has_model_field_prefetched', 'set_environ', 'IllegalArgumentError', 'get_custom_venv_choices', 'get_external_account',
-           'task_manager_bulk_reschedule', 'schedule_task_manager']
+           'task_manager_bulk_reschedule', 'schedule_task_manager', 'classproperty']
 
 
 def get_object_or_400(klass, *args, **kwargs):
@@ -113,13 +111,13 @@ def get_memoize_cache():
     return cache
 
 
-def memoize(ttl=60, cache_key=None, track_function=False):
+def memoize(ttl=60, cache_key=None, track_function=False, cache=None):
     '''
     Decorator to wrap a function and cache its result.
     '''
     if cache_key and track_function:
         raise IllegalArgumentError("Can not specify cache_key when track_function is True")
-    cache = get_memoize_cache()
+    cache = cache or get_memoize_cache()
 
     def memoize_decorator(f):
         @wraps(f)
@@ -153,18 +151,23 @@ def memoize_delete(function_name):
     return cache.delete(function_name)
 
 
-@memoize()
-def get_ansible_version():
+def _get_ansible_version(ansible_path):
     '''
     Return Ansible version installed.
+    Ansible path needs to be provided to account for custom virtual environments
     '''
     try:
-        proc = subprocess.Popen(['ansible', '--version'],
+        proc = subprocess.Popen([ansible_path, '--version'],
                                 stdout=subprocess.PIPE)
         result = smart_str(proc.communicate()[0])
         return result.split('\n')[0].replace('ansible', '').strip()
     except Exception:
         return 'unknown'
+
+
+@memoize()
+def get_ansible_version():
+    return _get_ansible_version('ansible')
 
 
 @memoize()
@@ -420,10 +423,8 @@ def model_to_dict(obj, serializer_mapping=None):
 
     allowed_fields = get_allowed_fields(obj, serializer_mapping)
 
-    for field in obj._meta.fields:
-        if field.name not in allowed_fields:
-            continue
-        attr_d[field.name] = _convert_model_field_for_display(obj, field.name, password_fields=password_fields)
+    for field_name in allowed_fields:
+        attr_d[field_name] = _convert_model_field_for_display(obj, field_name, password_fields=password_fields)
     return attr_d
 
 
@@ -831,7 +832,7 @@ def wrap_args_with_proot(args, cwd, **kwargs):
     new_args = [getattr(settings, 'AWX_PROOT_CMD', 'bwrap'), '--unshare-pid', '--dev-bind', '/', '/', '--proc', '/proc']
     hide_paths = [settings.AWX_PROOT_BASE_PATH]
     if not kwargs.get('isolated'):
-        hide_paths.extend(['/etc/tower', '/var/lib/awx', '/var/log',
+        hide_paths.extend(['/etc/tower', '/var/lib/awx', '/var/log', '/etc/ssh',
                            settings.PROJECTS_ROOT, settings.JOBOUTPUT_ROOT])
     hide_paths.extend(getattr(settings, 'AWX_PROOT_HIDE_PATHS', None) or [])
     for path in sorted(set(hide_paths)):
@@ -892,13 +893,6 @@ def get_pk_from_dict(_dict, key):
         return None
 
 
-def timestamp_apiformat(timestamp):
-    timestamp = timestamp.isoformat()
-    if timestamp.endswith('+00:00'):
-        timestamp = timestamp[:-6] + 'Z'
-    return timestamp
-
-
 class NoDefaultProvided(object):
     pass
 
@@ -938,130 +932,22 @@ def get_current_apps():
     return current_apps
 
 
-def get_custom_venv_choices():
+def get_custom_venv_choices(custom_paths=None):
     from django.conf import settings
-    custom_venv_path = settings.BASE_VENV_PATH
-    if os.path.exists(custom_venv_path):
-        return [
-            os.path.join(custom_venv_path, x, '')
-            for x in os.listdir(custom_venv_path)
-            if x != 'awx' and
-            os.path.isdir(os.path.join(custom_venv_path, x)) and
-            os.path.exists(os.path.join(custom_venv_path, x, 'bin', 'activate'))
-        ]
-    else:
-        return []
+    custom_paths = custom_paths or settings.CUSTOM_VENV_PATHS
+    all_venv_paths = [settings.BASE_VENV_PATH] + custom_paths
+    custom_venv_choices = []
 
-
-class OutputEventFilter(object):
-    '''
-    File-like object that looks for encoded job events in stdout data.
-    '''
-
-    EVENT_DATA_RE = re.compile(r'\x1b\[K((?:[A-Za-z0-9+/=]+\x1b\[\d+D)+)\x1b\[K')
-
-    def __init__(self, event_callback):
-        self._event_callback = event_callback
-        self._counter = 0
-        self._start_line = 0
-        self._buffer = StringIO()
-        self._last_chunk = ''
-        self._current_event_data = None
-
-    def flush(self):
-        # pexpect wants to flush the file it writes to, but we're not
-        # actually capturing stdout to a raw file; we're just
-        # implementing a custom `write` method to discover and emit events from
-        # the stdout stream
-        pass
-
-    def write(self, data):
-        data = smart_str(data)
-        self._buffer.write(data)
-
-        # keep a sliding window of the last chunk written so we can detect
-        # event tokens and determine if we need to perform a search of the full
-        # buffer
-        should_search = '\x1b[K' in (self._last_chunk + data)
-        self._last_chunk = data
-
-        # Only bother searching the buffer if we recently saw a start/end
-        # token (\x1b[K)
-        while should_search:
-            value = self._buffer.getvalue()
-            match = self.EVENT_DATA_RE.search(value)
-            if not match:
-                break
-            try:
-                base64_data = re.sub(r'\x1b\[\d+D', '', match.group(1))
-                event_data = json.loads(base64.b64decode(base64_data))
-            except ValueError:
-                event_data = {}
-            self._emit_event(value[:match.start()], event_data)
-            remainder = value[match.end():]
-            self._buffer = StringIO()
-            self._buffer.write(remainder)
-            self._last_chunk = remainder
-
-    def close(self):
-        value = self._buffer.getvalue()
-        if value:
-            self._emit_event(value)
-            self._buffer = StringIO()
-        self._event_callback(dict(event='EOF', final_counter=self._counter))
-
-    def _emit_event(self, buffered_stdout, next_event_data=None):
-        next_event_data = next_event_data or {}
-        if self._current_event_data:
-            event_data = self._current_event_data
-            stdout_chunks = [buffered_stdout]
-        elif buffered_stdout:
-            event_data = dict(event='verbose')
-            stdout_chunks = buffered_stdout.splitlines(True)
-        else:
-            stdout_chunks = []
-
-        for stdout_chunk in stdout_chunks:
-            self._counter += 1
-            event_data['counter'] = self._counter
-            event_data['stdout'] = stdout_chunk[:-2] if len(stdout_chunk) > 2 else ""
-            n_lines = stdout_chunk.count('\n')
-            event_data['start_line'] = self._start_line
-            event_data['end_line'] = self._start_line + n_lines
-            self._start_line += n_lines
-            if self._event_callback:
-                self._event_callback(event_data)
-
-        if next_event_data.get('uuid', None):
-            self._current_event_data = next_event_data
-        else:
-            self._current_event_data = None
-
-
-class OutputVerboseFilter(OutputEventFilter):
-    '''
-    File-like object that dispatches stdout data.
-    Does not search for encoded job event data.
-    Use for unified job types that do not encode job event data.
-    '''
-    def write(self, data):
-        self._buffer.write(data)
-
-        # if the current chunk contains a line break
-        if data and '\n' in data:
-            # emit events for all complete lines we know about
-            lines = self._buffer.getvalue().splitlines(True)  # keep ends
-            remainder = None
-            # if last line is not a complete line, then exclude it
-            if '\n' not in lines[-1]:
-                remainder = lines.pop()
-            # emit all complete lines
-            for line in lines:
-                self._emit_event(line)
-            self._buffer = StringIO()
-            # put final partial line back on buffer
-            if remainder:
-                self._buffer.write(remainder)
+    for custom_venv_path in all_venv_paths:
+        if os.path.exists(custom_venv_path):
+            custom_venv_choices.extend([
+                os.path.join(custom_venv_path, x, '')
+                for x in os.listdir(custom_venv_path)
+                if x != 'awx' and
+                os.path.isdir(os.path.join(custom_venv_path, x)) and
+                os.path.exists(os.path.join(custom_venv_path, x, 'bin', 'activate'))
+            ])
+    return custom_venv_choices
 
 
 def is_ansible_variable(key):
@@ -1095,9 +981,8 @@ def has_model_field_prefetched(model_obj, field_name):
 
 def get_external_account(user):
     from django.conf import settings
-    from awx.conf.license import feature_enabled
     account_type = None
-    if getattr(settings, 'AUTH_LDAP_SERVER_URI', None) and feature_enabled('ldap'):
+    if getattr(settings, 'AUTH_LDAP_SERVER_URI', None):
         try:
             if user.pk and user.profile.ldap_dn and not user.has_usable_password():
                 account_type = "ldap"
@@ -1113,3 +998,17 @@ def get_external_account(user):
             getattr(settings, 'TACACSPLUS_HOST', None)) and user.enterprise_auth.all():
         account_type = "enterprise"
     return account_type
+
+
+class classproperty:
+
+    def __init__(self, fget=None, fset=None, fdel=None, doc=None):
+        self.fget = fget
+        self.fset = fset
+        self.fdel = fdel
+        if doc is None and fget is not None:
+            doc = fget.__doc__
+        self.__doc__ = doc
+
+    def __get__(self, instance, ownerclass):
+        return self.fget(ownerclass)

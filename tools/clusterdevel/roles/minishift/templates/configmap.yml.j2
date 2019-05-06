@@ -63,7 +63,6 @@ data:
     LOGGING['loggers']['rbac_migrations']['handlers'] = ['console']
     LOGGING['loggers']['awx.isolated.manager.playbooks']['handlers'] = ['console']
     LOGGING['handlers']['callback_receiver'] = {'class': 'logging.NullHandler'}
-    LOGGING['handlers']['fact_receiver'] = {'class': 'logging.NullHandler'}
     LOGGING['handlers']['task_system'] = {'class': 'logging.NullHandler'}
     LOGGING['handlers']['tower_warnings'] = {'class': 'logging.NullHandler'}
     LOGGING['handlers']['rbac_migrations'] = {'class': 'logging.NullHandler'}
@@ -73,7 +72,7 @@ data:
     DATABASES = {
         'default': {
             'ATOMIC_REQUESTS': True,
-            'ENGINE': 'django.db.backends.postgresql',
+            'ENGINE': 'awx.main.db.profiled_pg',
             'NAME': "awx",
             'USER': "awx",
             'PASSWORD': "awx",

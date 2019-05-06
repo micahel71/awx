@@ -242,6 +242,31 @@ const getNotificationTemplate = (namespace = session) => getOrganization(namespa
         }
     }));
 
+const waitForJob = endpoint => {
+    const interval = 2000;
+    const statuses = ['successful', 'failed', 'error', 'canceled'];
+
+    let attempts = 30;
+
+    return new Promise((resolve, reject) => {
+        (function pollStatus () {
+            get(endpoint).then(update => {
+                const completed = statuses.indexOf(update.data.status) > -1;
+
+                if (completed) {
+                    return resolve(update.data);
+                }
+
+                if (--attempts <= 0) {
+                    return reject(new Error('Retry limit exceeded.'));
+                }
+
+                return setTimeout(pollStatus, interval);
+            });
+        }());
+    });
+};
+
 /* Retrieves a project, and creates it if it does not exist.
  * name prefix. If an organization does not exist with the same prefix, it is
  * created as well.
@@ -263,41 +288,16 @@ const getProject = (
         scm_type: `${scmType}`
     }));
 
-const waitForJob = endpoint => {
-    const interval = 2000;
-    const statuses = ['successful', 'failed', 'error', 'canceled'];
-
-    let attempts = 20;
-
-    return new Promise((resolve, reject) => {
-        (function pollStatus () {
-            get(endpoint).then(update => {
-                const completed = statuses.indexOf(update.data.status) > -1;
-
-                if (completed) {
-                    return resolve(update.data);
-                }
-
-                if (--attempts <= 0) {
-                    return reject(new Error('Retry limit exceeded.'));
-                }
-
-                return setTimeout(pollStatus, interval);
-            });
-        }());
-    });
+const getUpdatedProject = (namespace = session) => {
+    const promises = [
+        getProject(namespace),
+    ];
+    return Promise.all(promises)
+        .then(([project]) =>
+            post(`/api/v2/projects/${project.id}/update/`, {})
+                .then(update => waitForJob(update.data.url))
+                .then(() => getProject(namespace)));
 };
-
-const getUpdatedProject = (namespace = session) => getProject(namespace)
-    .then(project => {
-        const updateURL = project.related.current_update;
-
-        if (updateURL) {
-            return waitForJob(updateURL).then(() => project);
-        }
-
-        return project;
-    });
 
 /* Retrieves a job template, and creates it if it does not exist.
  * name prefix. This function also runs getOrCreate for an inventory,
@@ -306,17 +306,24 @@ const getUpdatedProject = (namespace = session) => getProject(namespace)
  * @param [namespace] - Name prefix for associated dependencies.
  * @param [playbook] - Playbook for the job template.
  * @param [name] - Unique name prefix for the job template.
+ * @param [updateProject] - Choose whether to sync the project with its repository.
  * */
 const getJobTemplate = (
     namespace = session,
     playbook = 'hello_world.yml',
-    name = `${namespace}-job-template`
+    name = `${namespace}-job-template`,
+    updateProject = true,
+    jobSliceCount = 1
 ) => {
     const promises = [
         getInventory(namespace),
         getAdminMachineCredential(namespace),
-        getUpdatedProject(namespace)
     ];
+    if (updateProject) {
+        promises.push(getUpdatedProject(namespace));
+    } else {
+        promises.push(getProject(namespace));
+    }
 
     return Promise.all(promises)
         .then(([inventory, credential, project]) => getOrCreate('/job_templates/', {
@@ -326,6 +333,7 @@ const getJobTemplate = (
             credential: credential.id,
             project: project.id,
             playbook: `${playbook}`,
+            job_slice_count: `${jobSliceCount}`,
         }));
 };
 
@@ -334,17 +342,22 @@ const getJobTemplate = (
  * @param[namespace] - A unique name prefix for the job and its dependencies.
  * @param[playbook] - The playbook file to be run by the job template.
  * @param[name] - A unique name for the job template.
+ * @param[wait] - Choose whether to return the result of the completed job.
  */
 const getJob = (
     namespace = session,
     playbook = 'hello_world.yml',
-    name = `${namespace}-job-template`
+    name = `${namespace}-job-template`,
+    wait = true
 ) => getJobTemplate(namespace, playbook, name)
     .then(template => {
         const launchURL = template.related.launch;
         return post(launchURL, {}).then(response => {
             const jobURL = response.data.url;
-            return waitForJob(jobURL).then(() => response.data);
+            if (wait) {
+                return waitForJob(jobURL).then(() => response.data);
+            }
+            return response.data;
         });
     });
 
@@ -421,15 +434,19 @@ const getAuditor = (namespace = session) => getOrganization(namespace)
  */
 const getUser = (
     namespace = session,
-    username = `user-${uuid().substr(0, 8)}`
+    // unique substrings are needed to avoid the edge case
+    // where a user and org both exist, but the user is not in the organization.
+    // this ensures a new user is always created.
+    username = `user-${uuid().substr(0, 8)}`,
+    isSuperuser = false
 ) => getOrganization(namespace)
     .then(organization => getOrCreate(`/organizations/${organization.id}/users/`, {
-        username: `${username}`,
+        username: `${username}-${uuid().substr(0, 8)}`,
         organization: organization.id,
         first_name: 'firstname',
         last_name: 'lastname',
         email: 'null@ansible.com',
-        is_superuser: false,
+        is_superuser: `${isSuperuser}`,
         is_system_auditor: false,
         password: AWX_E2E_PASSWORD
     }, ['username']));

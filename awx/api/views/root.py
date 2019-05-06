@@ -26,7 +26,7 @@ from awx.main.utils import (
     to_python_boolean,
 )
 from awx.api.versioning import reverse, get_request_version, drf_reverse
-from awx.conf.license import get_license, feature_enabled
+from awx.conf.license import get_license
 from awx.main.constants import PRIVILEGE_ESCALATION_METHODS
 from awx.main.models import (
     Project,
@@ -57,9 +57,8 @@ class ApiRootView(APIView):
         data['current_version'] = v2
         data['available_versions'] = dict(v1 = v1, v2 = v2)
         data['oauth2'] = drf_reverse('api:oauth_authorization_root_view')
-        if feature_enabled('rebranding'):
-            data['custom_logo'] = settings.CUSTOM_LOGO
-            data['custom_login_info'] = settings.CUSTOM_LOGIN_INFO
+        data['custom_logo'] = settings.CUSTOM_LOGO
+        data['custom_login_info'] = settings.CUSTOM_LOGIN_INFO
         return Response(data)
 
 
@@ -101,8 +100,10 @@ class ApiVersionRootView(APIView):
         data['credentials'] = reverse('api:credential_list', request=request)
         if get_request_version(request) > 1:
             data['credential_types'] = reverse('api:credential_type_list', request=request)
+            data['credential_input_sources'] = reverse('api:credential_input_source_list', request=request)
             data['applications'] = reverse('api:o_auth2_application_list', request=request)
             data['tokens'] = reverse('api:o_auth2_token_list', request=request)
+            data['metrics'] = reverse('api:metrics_view', request=request)
         data['inventory'] = reverse('api:inventory_list', request=request)
         data['inventory_scripts'] = reverse('api:inventory_script_list', request=request)
         data['inventory_sources'] = reverse('api:inventory_source_list', request=request)
@@ -157,11 +158,12 @@ class ApiV1PingView(APIView):
             'ha': is_ha_environment(),
             'version': get_awx_version(),
             'active_node': settings.CLUSTER_HOST_ID,
+            'install_uuid': settings.INSTALL_UUID,
         }
 
         response['instances'] = []
         for instance in Instance.objects.all():
-            response['instances'].append(dict(node=instance.hostname, heartbeat=instance.modified,
+            response['instances'].append(dict(node=instance.hostname, uuid=instance.uuid, heartbeat=instance.modified,
                                               capacity=instance.capacity, version=instance.version))
             sorted(response['instances'], key=operator.itemgetter('node'))
         response['instance_groups'] = []
@@ -211,7 +213,7 @@ class ApiV1ConfigView(APIView):
         # If LDAP is enabled, user_ldap_fields will return a list of field
         # names that are managed by LDAP and should be read-only for users with
         # a non-empty ldap_dn attribute.
-        if getattr(settings, 'AUTH_LDAP_SERVER_URI', None) and feature_enabled('ldap'):
+        if getattr(settings, 'AUTH_LDAP_SERVER_URI', None):
             user_ldap_fields = ['username', 'password']
             user_ldap_fields.extend(getattr(settings, 'AUTH_LDAP_USER_ATTR_MAP', {}).keys())
             user_ldap_fields.extend(getattr(settings, 'AUTH_LDAP_USER_FLAGS_BY_GROUP', {}).keys())
@@ -220,7 +222,8 @@ class ApiV1ConfigView(APIView):
         if request.user.is_superuser \
                 or request.user.is_system_auditor \
                 or Organization.accessible_objects(request.user, 'admin_role').exists() \
-                or Organization.accessible_objects(request.user, 'auditor_role').exists():
+                or Organization.accessible_objects(request.user, 'auditor_role').exists() \
+                or Organization.accessible_objects(request.user, 'project_admin_role').exists():
             data.update(dict(
                 project_base_dir = settings.PROJECTS_ROOT,
                 project_local_paths = Project.get_local_path_choices(),
@@ -276,6 +279,3 @@ class ApiV1ConfigView(APIView):
         except Exception:
             # FIX: Log
             return Response({"error": _("Failed to remove license.")}, status=status.HTTP_400_BAD_REQUEST)
-
-
-

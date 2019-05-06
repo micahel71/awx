@@ -56,7 +56,6 @@ LOGGING['handlers']['tower_warnings']['filename'] = '/var/log/tower/tower.log'  
 LOGGING['handlers']['callback_receiver']['filename'] = '/var/log/tower/callback_receiver.log'  # noqa
 LOGGING['handlers']['dispatcher']['filename'] = '/var/log/tower/dispatcher.log'  # noqa
 LOGGING['handlers']['task_system']['filename'] = '/var/log/tower/task_system.log'  # noqa
-LOGGING['handlers']['fact_receiver']['filename'] = '/var/log/tower/fact_receiver.log'  # noqa
 LOGGING['handlers']['management_playbooks']['filename'] = '/var/log/tower/management_playbooks.log'  # noqa
 LOGGING['handlers']['system_tracking_migrations']['filename'] = '/var/log/tower/tower_system_tracking_migrations.log'  # noqa
 LOGGING['handlers']['rbac_migrations']['filename'] = '/var/log/tower/tower_rbac_migrations.log'  # noqa
@@ -107,3 +106,12 @@ except IOError:
             raise ImproperlyConfigured(msg)
     else:
         raise
+
+
+CELERYBEAT_SCHEDULE.update({  # noqa
+    'isolated_heartbeat': {
+        'task': 'awx.main.tasks.awx_isolated_heartbeat',
+        'schedule': timedelta(seconds=AWX_ISOLATED_PERIODIC_CHECK),  # noqa
+        'options': {'expires': AWX_ISOLATED_PERIODIC_CHECK * 2},  # noqa
+    }
+})

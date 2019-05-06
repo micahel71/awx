@@ -4,6 +4,10 @@ import {
     getTeam,
 } from '../fixtures';
 
+import {
+    AWX_E2E_URL
+} from '../settings';
+
 const namespace = 'test-org-permissions';
 
 let data;
@@ -18,7 +22,6 @@ const modalOrgsSearchBar = '//smart-search[@django-model="organizations"]//input
 
 const orgsNavTab = "//at-side-nav-item[contains(@name, 'ORGANIZATIONS')]";
 const teamsNavTab = "//at-side-nav-item[contains(@name, 'TEAMS')]";
-const usersNavTab = "//at-side-nav-item[contains(@name, 'USERS')]";
 
 const orgTab = '//div[not(@ng-show="showSection2Container()")]/div[@class="Form-tabHolder"]/div[@ng-click="selectTab(\'organizations\')"]';
 const teamsTab = '//*[@id="teams_tab"]';
@@ -39,10 +42,7 @@ const teamsText = `name.iexact:"${namespace}-team"`;
 const teamsSearchBadgeCount = '//span[contains(@class, "List-titleBadge") and contains(text(), "1")]';
 const teamCheckbox = '//*[@item="team"]//input[@type="checkbox"]';
 const addUserToTeam = '//*[@aw-tool-tip="Add User"]';
-const userText = `username.iexact:"${namespace}-user"`;
 
-const trashButton = '//i[contains(@class, "fa-trash")]';
-const deleteButton = '//*[text()="DELETE"]';
 const saveButton = '//*[text()="Save"]';
 
 const addPermission = '//*[@aw-tool-tip="Grant Permission"]';
@@ -99,8 +99,9 @@ module.exports = {
             .useXpath()
             .findThenClick(usersTab)
             .findThenClick(addUserToTeam)
+            .waitForElementVisible(modalSearchBar)
             .clearValue(modalSearchBar)
-            .setValue(modalSearchBar, [userText, client.Keys.ENTER])
+            .setValue(modalSearchBar, [`username.iexact:${data.user.username}`, client.Keys.ENTER])
             .waitForElementNotVisible(spinny)
             .findThenClick(checkbox)
             .findThenClick(userRoleSearchBar)
@@ -109,6 +110,8 @@ module.exports = {
             .findThenClick(saveButton)
             // add team-wide permissions to an organization
             .findThenClick(orgsNavTab)
+            .navigateTo(`${AWX_E2E_URL}/#/organizations`, false)
+            .waitForElementVisible(searchBar)
             .clearValue(searchBar)
             .setValue(searchBar, [orgsText, client.Keys.ENTER])
             .waitForElementNotVisible(spinny)
@@ -126,16 +129,10 @@ module.exports = {
             .waitForElementNotVisible(spinny)
             .findThenClick(saveButton)
             .clearValue(searchBar)
-            .setValue(searchBar, [userText, client.Keys.ENTER])
+            .setValue(searchBar, [`username.iexact:${data.user.username}`, client.Keys.ENTER])
             .waitForElementVisible(verifyTeamPermissions);
     },
     after: client => {
-        client
-            .findThenClick(usersNavTab)
-            .setValue(searchBar, [userText, client.Keys.ENTER])
-            .waitForElementNotVisible(spinny)
-            .findThenClick(trashButton)
-            .findThenClick(deleteButton)
-            .end();
+        client.end();
     }
 };

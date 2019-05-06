@@ -236,6 +236,18 @@ function getLicenseErrorDetails () {
     return { label, value };
 }
 
+function getHostLimitErrorDetails () {
+    if (!resource.model.has('org_host_limit_error')) {
+        return null;
+    }
+
+    const label = strings.get('labels.HOST_LIMIT_ERROR');
+    const tooltip = strings.get('tooltips.HOST_LIMIT');
+    const value = resource.model.get('org_host_limit_error');
+
+    return { tooltip, label, value };
+}
+
 function getLaunchedByDetails () {
     const createdBy = resource.model.get('summary_fields.created_by');
     const jobTemplate = resource.model.get('summary_fields.job_template');
@@ -453,7 +465,13 @@ function getCredentialDetails () {
 }
 
 function buildCredentialDetails (credential) {
-    const icon = `${credential.kind}`;
+    let icon;
+    if (credential.cloud) {
+        icon = 'cloud';
+    } else {
+        icon = `${credential.kind}`;
+    }
+
     const link = `/#/credentials/${credential.id}`;
     const tooltip = strings.get('tooltips.CREDENTIAL');
     const value = $filter('sanitize')(credential.name);
@@ -804,6 +822,7 @@ function JobDetailsController (
         vm.overwrite = getOverwriteDetails();
         vm.overwriteVars = getOverwriteVarsDetails();
         vm.licenseError = getLicenseErrorDetails();
+        vm.hostLimitError = getHostLimitErrorDetails();
 
         // Relaunch and Delete Components
         vm.job = angular.copy(_.get(resource.model, 'model.GET', {}));
@@ -822,6 +841,8 @@ function JobDetailsController (
             finished,
             scm,
             inventoryScm,
+            scmRevision,
+            instanceGroup,
             environment,
             artifacts,
             executionNode
@@ -834,6 +855,8 @@ function JobDetailsController (
             vm.artifacts = getArtifactsDetails(artifacts);
             vm.executionNode = getExecutionNodeDetails(executionNode);
             vm.inventoryScm = getInventoryScmDetails(inventoryScm.id, inventoryScm.status);
+            vm.scmRevision = getSCMRevisionDetails(scmRevision);
+            vm.instanceGroup = getInstanceGroupDetails(instanceGroup);
             vm.status = getStatusDetails(status);
             vm.job.status = status;
         });

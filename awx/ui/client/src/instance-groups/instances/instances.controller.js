@@ -1,25 +1,68 @@
-function InstancesController ($scope, $state, $http, models, strings, Dataset, ProcessErrors) {
+function InstancesController ($scope, $state, $http, $transitions, models, strings, Dataset, ProcessErrors) {
     const { instanceGroup } = models;
     const vm = this || {};
+    let paginateQuerySet = {};
     vm.strings = strings;
     vm.panelTitle = instanceGroup.get('name');
     vm.instance_group_id = instanceGroup.get('id');
     vm.policy_instance_list = instanceGroup.get('policy_instance_list');
     vm.isSuperuser = $scope.$root.user_is_superuser;
 
+    vm.list = {
+        name: 'instances',
+        iterator: 'instance',
+        basePath: `/api/v2/instance_groups/${vm.instance_group_id}/instances/`
+    };
+    vm.instance_dataset = Dataset.data;
+    vm.instances = Dataset.data.results;
 
-    init();
+    const toolbarSortDefault = {
+        label: `${strings.get('sort.NAME_ASCENDING')}`,
+        value: 'hostname'
+    };
 
-    function init() {
-        vm.list = {
-            name: 'instances',
-            iterator: 'instance',
-            basePath: `/api/v2/instance_groups/${vm.instance_group_id}/instances/`
-        };
+    vm.toolbarSortValue = toolbarSortDefault;
+    vm.toolbarSortOptions = [
+        toolbarSortDefault,
+        { label: `${strings.get('sort.NAME_DESCENDING')}`, value: '-hostname' },
+        { label: `${strings.get('sort.UUID_ASCENDING')}`, value: 'uuid' },
+        { label: `${strings.get('sort.UUID_DESCENDING')}`, value: '-uuid' },
+        { label: `${strings.get('sort.CREATED_ASCENDING')}`, value: 'created' },
+        { label: `${strings.get('sort.CREATED_DESCENDING')}`, value: '-created' },
+        { label: `${strings.get('sort.MODIFIED_ASCENDING')}`, value: 'modified' },
+        { label: `${strings.get('sort.MODIFIED_DESCENDING')}`, value: '-modified' },
+        { label: `${strings.get('sort.CAPACITY_ASCENDING')}`, value: 'capacity' },
+        { label: `${strings.get('sort.CAPACITY_DESCENDING')}`, value: '-capacity' }
+    ];
 
-        vm.dataset = Dataset.data;
-        vm.instances = instanceGroup.get('related.instances.results');
+    const removeStateParamsListener = $scope.$watchCollection('$state.params', () => {
+        setToolbarSort();
+    });
+
+    function setToolbarSort () {
+        const orderByValue = _.get($state.params, 'instance_search.order_by');
+        const sortValue = _.find(vm.toolbarSortOptions, (option) => option.value === orderByValue);
+        if (sortValue) {
+            vm.toolbarSortValue = sortValue;
+        } else {
+            vm.toolbarSortValue = toolbarSortDefault;
+        }
     }
+
+    vm.onToolbarSort = (sort) => {
+        vm.toolbarSortValue = sort;
+
+        const queryParams = Object.assign(
+            {},
+            $state.params.instance_search,
+            paginateQuerySet,
+            { order_by: sort.value }
+        );
+
+        $state.go('.', {
+            instance_search: queryParams
+        }, { notify: false, location: 'replace' });
+    };
 
     vm.tab = {
         details: {
@@ -84,12 +127,33 @@ function InstancesController ($scope, $state, $http, models, strings, Dataset, P
         let selected = parseInt($state.params.instance_id);
         return id === selected;
     };
+
+    const removeUpdateDatasetListener = $scope.$on('updateDataset', (e, dataset, queryset) => {
+        vm.instances = dataset.results;
+        vm.instance_dataset = dataset;
+        paginateQuerySet = queryset;
+    });
+
+    const removeStateChangeListener = $transitions.onSuccess({}, function(trans) {
+        if (trans.to().name === 'instanceGroups.instances.modal.add') {
+            removeUpdateDatasetListener();
+            removeStateChangeListener();
+            removeStateParamsListener();
+        }
+    });
+
+    $scope.$on('$destroy', function() {
+        removeUpdateDatasetListener();
+        removeStateChangeListener();
+        removeStateParamsListener();
+    });
 }
 
 InstancesController.$inject = [
     '$scope',
     '$state',
     '$http',
+    '$transitions',
     'resolvedModels',
     'InstanceGroupsStrings',
     'Dataset',

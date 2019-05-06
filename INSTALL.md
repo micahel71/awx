@@ -27,7 +27,7 @@ This document provides a guide for installing AWX.
   - [Start the build](#start-the-build-1)
   - [Accessing AWX](#accessing-awx-1)
   - [SSL Termination](#ssl-termination)
-- [Docker or Docker Compose](#docker-or-docker-compose)
+- [Docker Compose](#docker-compose)
   - [Prerequisites](#prerequisites-3)
   - [Pre-build steps](#pre-build-steps-2)
     - [Deploying to a remote host](#deploying-to-a-remote-host)
@@ -59,7 +59,9 @@ Before you can run a deployment, you'll need the following installed in your loc
 
 - [Ansible](http://docs.ansible.com/ansible/latest/intro_installation.html) Requires Version 2.4+
 - [Docker](https://docs.docker.com/engine/installation/)
-- [docker-py](https://github.com/docker/docker-py) Python module
+- [docker](https://pypi.org/project/docker/) Python module
+    + This is incompatible with `docker-py`. If you have previously installed `docker-py`, please uninstall it.
+    + We use this module instead of `docker-py` because it is what the `docker-compose` Python module requires.
 - [GNU Make](https://www.gnu.org/software/make/)
 - [Git](https://git-scm.com/) Requires Version 1.8.4+
 - [Node 8.x LTS version](https://nodejs.org/en/download/)
@@ -73,7 +75,7 @@ The system that runs the AWX service will need to satisfy the following requirem
 - At least 2 cpu cores
 - At least 20GB of space
 - Running Docker, Openshift, or Kubernetes
-- If you choose to use an external PostgreSQL database, please note that the minimum version is 9.4.
+- If you choose to use an external PostgreSQL database, please note that the minimum version is 9.6+.
 
 ### AWX Tunables
 
@@ -81,14 +83,14 @@ The system that runs the AWX service will need to satisfy the following requirem
 
 ### Choose a deployment platform
 
-We currently support running AWX as a containerized application using Docker images deployed to either an OpenShift cluster, docker-compose or a standalone Docker daemon. The remainder of this document will walk you through the process of building the images, and deploying them to either platform.
+We currently support running AWX as a containerized application using Docker images deployed to either an OpenShift cluster or docker-compose. The remainder of this document will walk you through the process of building the images, and deploying them to either platform.
 
 The [installer](./installer) directory contains an [inventory](./installer/inventory) file, and a playbook, [install.yml](./installer/install.yml). You'll begin by setting variables in the inventory file according to the platform you wish to use, and then you'll start the image build and deployment process by running the playbook.
 
 In the sections below, you'll find deployment details and instructions for each platform:
 - [OpenShift](#openshift)
 - [Kubernetes](#kubernetes)
-- [Docker or Docker Compose](#docker-or-docker-compose).
+- [Docker Compose](#docker-compose).
 
 ### Official vs Building Images
 
@@ -391,14 +393,14 @@ If your provider is able to allocate an IP Address from the Ingress controller t
 Unlike Openshift's `Route` the Kubernetes `Ingress` doesn't yet handle SSL termination. As such the default configuration will only expose AWX through HTTP on port 80. You are responsible for configuring SSL support until support is added (either to Kubernetes or AWX itself).
 
 
-## Docker or Docker-Compose
+## Docker-Compose
 
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/engine/installation/) on the host where AWX will be deployed. After installing Docker, the Docker service must be started (depending on your OS, you may have to add the local user that uses Docker to the ``docker`` group, refer to the documentation for details)
-- [docker-py](https://github.com/docker/docker-py) Python module.
-
-If you're installing using Docker Compose, you'll need [Docker Compose](https://docs.docker.com/compose/install/).
+- [docker-compose](https://pypi.org/project/docker-compose/) Python module.
+    + This also installs the `docker` Python module, which is incompatible with `docker-py`. If you have previously installed `docker-py`, please uninstall it.
+- [Docker Compose](https://docs.docker.com/compose/install/).
 
 ### Pre-build steps
 
@@ -441,13 +443,13 @@ Before starting the build process, review the [inventory](./installer/inventory)
 
 > Provide a port number that can be mapped from the Docker daemon host to the web server running inside the AWX container. Defaults to *80*.
 
-*use_docker_compose*
+*ssl_certificate*
 
-> Switch to ``true`` to use Docker Compose instead of the standalone Docker install.
+> Optionally, provide the path to a file that contains a certificate and its private key.
 
 *docker_compose_dir*
 
-When using docker-compose, the `docker-compose.yml` file will be created there (default `/var/lib/awx`).
+> When using docker-compose, the `docker-compose.yml` file will be created there (default `/tmp/awxcompose`).
 
 *ca_trust_dir*
 
@@ -527,7 +529,7 @@ After the playbook run completes, Docker will report up to 5 running containers.
 ```bash
 CONTAINER ID        IMAGE               COMMAND                  CREATED             STATUS              PORTS                                NAMES
 e240ed8209cd        awx_task:1.0.0.8    "/tini -- /bin/sh ..."   2 minutes ago       Up About a minute   8052/tcp                             awx_task
-1cfd02601690        awx_web:1.0.0.8     "/tini -- /bin/sh ..."   2 minutes ago       Up About a minute   0.0.0.0:80->8052/tcp                 awx_web
+1cfd02601690        awx_web:1.0.0.8     "/tini -- /bin/sh ..."   2 minutes ago       Up About a minute   0.0.0.0:443->8052/tcp                 awx_web
 55a552142bcd        memcached:alpine    "docker-entrypoint..."   2 minutes ago       Up 2 minutes        11211/tcp                            memcached
 84011c072aad        rabbitmq:3          "docker-entrypoint..."   2 minutes ago       Up 2 minutes        4369/tcp, 5671-5672/tcp, 25672/tcp   rabbitmq
 97e196120ab3        postgres:9.6        "docker-entrypoint..."   2 minutes ago       Up 2 minutes        5432/tcp                             postgres

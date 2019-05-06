@@ -6,30 +6,20 @@ ADD Makefile /tmp/Makefile
 
 RUN mkdir /tmp/requirements
 
-RUN yum -y update && yum -y install curl epel-release && yum -y install https://centos7.iuscommunity.org/ius-release.rpm
-RUN yum -y localinstall http://download.postgresql.org/pub/repos/yum/9.4/redhat/rhel-6-x86_64/pgdg-centos94-9.4-3.noarch.rpm
+RUN yum -y update && yum -y install epel-release
+RUN yum -y localinstall https://download.postgresql.org/pub/repos/yum/9.6/redhat/rhel-7-x86_64/pgdg-redhat96-9.6-3.noarch.rpm
+
+# sync with installer/roles/image_build/templates/Dockerfile.j2
+RUN yum -y install ansible git mercurial subversion curl python-psycopg2 python-pip python-setuptools libselinux-python setools-libs yum-utils sudo acl make postgresql-devel nginx python-psutil libxml2-devel libxslt-devel libstdc++.so.6 gcc cyrus-sasl-devel cyrus-sasl openldap-devel libffi-devel python-pip xmlsec1-devel swig krb5-devel xmlsec1-openssl xmlsec1 xmlsec1-openssl-devel libtool-ltdl-devel bubblewrap gcc-c++ python-devel python36-setuptools python36-devel krb5-workstation krb5-libs libcurl-devel rsync unzip
+
 RUN curl --silent --location https://rpm.nodesource.com/setup_8.x | bash -
+RUN yum -y install nodejs openssh-server tmux vim mg
 
-RUN yum -y update && yum -y install openssh-server ansible mg vim tmux \
-  git2u-core mercurial subversion python-devel python36 python36-devel python-psycopg2 make postgresql \
-  postgresql-devel nginx nodejs python-psutil libxml2-devel libxslt-devel \
-  libstdc++.so.6 gcc cyrus-sasl-devel cyrus-sasl openldap-devel libffi-devel \
-  xmlsec1-devel swig krb5-devel xmlsec1-openssl xmlsec1 \
-  xmlsec1-openssl-devel libtool-ltdl-devel rabbitmq-server bubblewrap \
-  zanata-python-client gettext gcc-c++ libcurl-devel bzip2 rsync \
-  pango libXcomposite libXcursor libXdamage \
-  libXext libXi libXtst cups-libs libXScrnSaver libXrandr GConf2 alsa-lib atk \
-  gtk3 ipa-gothic-fonts xorg-x11-fonts-100dpi xorg-x11-fonts-75dpi \
-  xorg-x11-utils xorg-x11-fonts-cyrillic xorg-x11-fonts-Type1 \
-  xorg-x11-fonts-misc
-
-RUN ln -s /usr/bin/python36 /usr/bin/python3
-
-RUN python36 -m ensurepip
+RUN python3 -m ensurepip
 RUN pip3 install virtualenv
 RUN /usr/bin/ssh-keygen -q -t rsa -N "" -f /root/.ssh/id_rsa
 RUN mkdir -p /data/db
-RUN pip3 install honcho
+RUN pip3 install honcho && pip install supervisor
 
 ADD requirements/requirements.txt \
   requirements/requirements_git.txt \
@@ -53,7 +43,10 @@ RUN openssl x509 -req -days 365 -in /etc/nginx/nginx.csr -signkey /etc/nginx/ngi
 WORKDIR /tmp
 
 RUN mkdir -p /venv && chmod g+w /venv
-RUN CFLAGS="-DXMLSEC_NO_SIZE_T" SWIG_FEATURES="-cpperraswarn -includeall -D__`uname -m`__ -I/usr/include/openssl" VENV_BASE="/venv" make requirements_dev
+RUN CFLAGS="-DXMLSEC_NO_SIZE_T" VENV_BASE="/venv" make requirements_dev
+RUN yum -y remove gcc postgresql-devel libxml2-devel libxslt-devel cyrus-sasl-devel openldap-devel xmlsec1-devel krb5-devel xmlsec1-openssl-devel libtool-ltdl-devel gcc-c++ python-devel python36-devel
+RUN yum -y clean all
+RUN rm -rf /root/.cache
 RUN localedef -c -i en_US -f UTF-8 en_US.UTF-8
 ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US:en
@@ -66,7 +59,7 @@ ENTRYPOINT ["/tini", "--"]
 CMD /start_development.sh
 
 # Pre-create things that we need to write to
-RUN for dir in /var/lib/awx/ /projects /.ansible /var/log/nginx /var/lib/nginx /.local; \
+RUN for dir in /var/lib/awx/ /var/log/tower/ /projects /.ansible /var/log/nginx /var/lib/nginx /.local; \
   do mkdir -p $dir; chmod -R g+rwx $dir; chgrp -R root $dir; done
 
 RUN for file in /etc/passwd /etc/supervisord.conf \

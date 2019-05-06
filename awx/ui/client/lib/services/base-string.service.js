@@ -61,7 +61,9 @@ function BaseStringService (namespace) {
     this.CANCEL = t.s('CANCEL');
     this.CLOSE = t.s('CLOSE');
     this.SAVE = t.s('SAVE');
+    this.SELECT = t.s('SELECT');
     this.OK = t.s('OK');
+    this.RUN = t.s('RUN');
     this.NEXT = t.s('NEXT');
     this.SHOW = t.s('SHOW');
     this.HIDE = t.s('HIDE');
@@ -73,6 +75,7 @@ function BaseStringService (namespace) {
     this.COPY = t.s('COPY');
     this.YES = t.s('YES');
     this.CLOSE = t.s('CLOSE');
+    this.TEST = t.s('TEST');
     this.SUCCESSFUL_CREATION = resource => t.s('{{ resource }} successfully created', { resource: $filter('sanitize')(resource) });
 
     this.deleteResource = {
@@ -98,6 +101,39 @@ function BaseStringService (namespace) {
         COPY: resourceType => t.s('Copy {{resourceType}}', { resourceType }),
         DELETE: resourceType => t.s('Delete the {{resourceType}}', { resourceType }),
         CANCEL: resourceType => t.s('Cancel the {{resourceType}}', { resourceType })
+    };
+
+    this.sort = {
+        NAME_ASCENDING: t.s('Name (Ascending)'),
+        NAME_DESCENDING: t.s('Name (Descending)'),
+        CREATED_ASCENDING: t.s('Created (Ascending)'),
+        CREATED_DESCENDING: t.s('Created (Descending)'),
+        MODIFIED_ASCENDING: t.s('Modified (Ascending)'),
+        MODIFIED_DESCENDING: t.s('Modified (Descending)'),
+        EXPIRES_ASCENDING: t.s('Expires (Ascending)'),
+        EXPIRES_DESCENDING: t.s('Expires (Descending)'),
+        LAST_JOB_RUN_ASCENDING: t.s('Last Run (Ascending)'),
+        LAST_JOB_RUN_DESCENDING: t.s('Last Run (Descending)'),
+        LAST_USED_ASCENDING: t.s('Last Used (Ascending)'),
+        LAST_USED_DESCENDING: t.s('Last Used (Descending)'),
+        USERNAME_ASCENDING: t.s('Username (Ascending)'),
+        USERNAME_DESCENDING: t.s('Username (Descending)'),
+        START_TIME_ASCENDING: t.s('Start Time (Ascending)'),
+        START_TIME_DESCENDING: t.s('Start Time (Descending)'),
+        FINISH_TIME_ASCENDING: t.s('Finish Time (Ascending)'),
+        FINISH_TIME_DESCENDING: t.s('Finish Time (Descending)'),
+        UUID_ASCENDING: t.s('UUID (Ascending)'),
+        UUID_DESCENDING: t.s('UUID (Descending)'),
+        LAUNCHED_BY_ASCENDING: t.s('Launched By (Ascending)'),
+        LAUNCHED_BY_DESCENDING: t.s('Launched By (Descending)'),
+        INVENTORY_ASCENDING: t.s('Inventory (Ascending)'),
+        INVENTORY_DESCENDING: t.s('Inventory (Descending)'),
+        PROJECT_ASCENDING: t.s('Project (Ascending)'),
+        PROJECT_DESCENDING: t.s('Project (Descending)'),
+        ORGANIZATION_ASCENDING: t.s('Organization (Ascending)'),
+        ORGANIZATION_DESCENDING: t.s('Organization (Descending)'),
+        CAPACITY_ASCENDING: t.s('Capacity (Ascending)'),
+        CAPACITY_DESCENDING: t.s('Capacity (Descending)')
     };
 
     this.ALERT = ({ header, body }) => t.s('{{ header }} {{ body }}', { header, body });

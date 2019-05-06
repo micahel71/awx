@@ -332,9 +332,19 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
         '''
         return self.create_unified_job(**kwargs)
 
+    def get_effective_slice_ct(self, kwargs):
+        actual_inventory = self.inventory
+        if self.ask_inventory_on_launch and 'inventory' in kwargs:
+            actual_inventory = kwargs['inventory']
+        if actual_inventory:
+            return min(self.job_slice_count, actual_inventory.hosts.count())
+        else:
+            return self.job_slice_count
+
     def create_unified_job(self, **kwargs):
         prevent_slicing = kwargs.pop('_prevent_slicing', False)
-        slice_event = bool(self.job_slice_count > 1 and (not prevent_slicing))
+        slice_ct = self.get_effective_slice_ct(kwargs)
+        slice_event = bool(slice_ct > 1 and (not prevent_slicing))
         if slice_event:
             # A Slice Job Template will generate a WorkflowJob rather than a Job
             from awx.main.models.workflow import WorkflowJobTemplate, WorkflowJobNode
@@ -342,18 +352,16 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
             kwargs['_parent_field_name'] = "job_template"
             kwargs.setdefault('_eager_fields', {})
             kwargs['_eager_fields']['is_sliced_job'] = True
+        elif self.job_slice_count > 1 and (not prevent_slicing):
+            # Unique case where JT was set to slice but hosts not available
+            kwargs.setdefault('_eager_fields', {})
+            kwargs['_eager_fields']['job_slice_count'] = 1
         elif prevent_slicing:
             kwargs.setdefault('_eager_fields', {})
             kwargs['_eager_fields'].setdefault('job_slice_count', 1)
         job = super(JobTemplate, self).create_unified_job(**kwargs)
         if slice_event:
-            try:
-                wj_config = job.launch_config
-            except JobLaunchConfig.DoesNotExist:
-                wj_config = JobLaunchConfig()
-            actual_inventory = wj_config.inventory if wj_config.inventory else self.inventory
-            for idx in range(min(self.job_slice_count,
-                                 actual_inventory.hosts.count())):
+            for idx in range(slice_ct):
                 create_kwargs = dict(workflow_job=job,
                                      unified_job_template=self,
                                      ancestor_artifacts=dict(job_slice=idx + 1))
@@ -605,60 +613,6 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
         new_prompts['_eager_fields']['job_slice_count'] = self.job_slice_count
         return super(Job, self).copy_unified_job(**new_prompts)
 
-    @property
-    def ask_diff_mode_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_diff_mode_on_launch
-        return False
-
-    @property
-    def ask_variables_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_variables_on_launch
-        return False
-
-    @property
-    def ask_limit_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_limit_on_launch
-        return False
-
-    @property
-    def ask_tags_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_tags_on_launch
-        return False
-
-    @property
-    def ask_skip_tags_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_skip_tags_on_launch
-        return False
-
-    @property
-    def ask_job_type_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_job_type_on_launch
-        return False
-
-    @property
-    def ask_verbosity_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_verbosity_on_launch
-        return False
-
-    @property
-    def ask_inventory_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_inventory_on_launch
-        return False
-
-    @property
-    def ask_credential_on_launch(self):
-        if self.job_template is not None:
-            return self.job_template.ask_credential_on_launch
-        return False
-
     def get_passwords_needed_to_start(self):
         return self.passwords_needed_to_start
 
@@ -821,7 +775,6 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
         return self.inventory.hosts.only(*only)
 
     def start_job_fact_cache(self, destination, modification_times, timeout=None):
-        destination = os.path.join(destination, 'facts')
         os.makedirs(destination, mode=0o700)
         hosts = self._get_inventory_hosts()
         if timeout is None:
@@ -846,7 +799,6 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
             modification_times[filepath] = os.path.getmtime(filepath)
 
     def finish_job_fact_cache(self, destination, modification_times):
-        destination = os.path.join(destination, 'facts')
         for host in self._get_inventory_hosts():
             filepath = os.sep.join(map(str, [destination, host.name]))
             if not os.path.realpath(filepath).startswith(destination):
@@ -863,8 +815,21 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
                             continue
                         host.ansible_facts = ansible_facts
                         host.ansible_facts_modified = now()
-                        if 'insights' in ansible_facts and 'system_id' in ansible_facts['insights']:
-                            host.insights_system_id = ansible_facts['insights']['system_id']
+                        ansible_local_system_id = ansible_facts.get('ansible_local', {}).get('insights', {}).get('system_id', None)
+                        ansible_facts_system_id = ansible_facts.get('insights', {}).get('system_id', None)
+                        if ansible_local_system_id:
+                            print("Setting local {}".format(ansible_local_system_id))
+                            logger.debug("Insights system_id {} found for host <{}, {}> in"
+                                         " ansible local facts".format(ansible_local_system_id,
+                                                                       host.inventory.id,
+                                                                       host.name))
+                            host.insights_system_id = ansible_local_system_id
+                        elif ansible_facts_system_id:
+                            logger.debug("Insights system_id {} found for host <{}, {}> in"
+                                         " insights facts".format(ansible_local_system_id,
+                                                                  host.inventory.id,
+                                                                  host.name))
+                            host.insights_system_id = ansible_facts_system_id
                         host.save()
                         system_tracking_logger.info(
                             'New fact for inventory {} host {}'.format(
@@ -1123,17 +1088,19 @@ class JobHostSummary(CreatedModifiedModel):
     changed = models.PositiveIntegerField(default=0, editable=False)
     dark = models.PositiveIntegerField(default=0, editable=False)
     failures = models.PositiveIntegerField(default=0, editable=False)
+    ignored = models.PositiveIntegerField(default=0, editable=False)
     ok = models.PositiveIntegerField(default=0, editable=False)
     processed = models.PositiveIntegerField(default=0, editable=False)
+    rescued = models.PositiveIntegerField(default=0, editable=False)
     skipped = models.PositiveIntegerField(default=0, editable=False)
     failed = models.BooleanField(default=False, editable=False)
 
     def __str__(self):
         host = getattr_dne(self, 'host')
         hostname = host.name if host else 'N/A'
-        return '%s changed=%d dark=%d failures=%d ok=%d processed=%d skipped=%s' % \
-            (hostname, self.changed, self.dark, self.failures, self.ok,
-             self.processed, self.skipped)
+        return '%s changed=%d dark=%d failures=%d ignored=%d ok=%d processed=%d rescued=%d skipped=%s' % \
+            (hostname, self.changed, self.dark, self.failures, self.ignored, self.ok,
+             self.processed, self.rescued, self.skipped)
 
     def get_absolute_url(self, request=None):
         return reverse('api:job_host_summary_detail', kwargs={'pk': self.pk}, request=request)

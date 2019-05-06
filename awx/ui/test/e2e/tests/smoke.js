@@ -9,7 +9,7 @@ const initializeData = () => {
     data.MACHINE_CREDENTIAL_NAME = `credential-machine-${id}`;
     data.ORGANIZATION_NAME = `organization-${id}`;
     data.PROJECT_NAME = `project-${id}`;
-    data.PROJECT_URL = 'https://github.com/jlaska/ansible-playbooks';
+    data.PROJECT_URL = 'https://github.com/ansible/test-playbooks';
     data.PROJECT_BRANCH = 'master';
     data.PLAYBOOK_NAME = 'multivault.yml';
     data.TEMPLATE_NAME = `template-${id}`;
@@ -159,8 +159,8 @@ module.exports = {
         client.click('div[class="CodeMirror-scroll"]');
         client.sendKeys('.CodeMirror textarea', client.Keys.ENTER);
         client.sendKeys('.CodeMirror textarea', 'ansible_connection: local');
-        client.click('#host_host_variables_parse_type label[class$="hollow"]');
-        client.click('#host_host_variables_parse_type label[class$="hollow"]');
+        client.click('#host_variables_parse_type label[class$="hollow"]');
+        client.click('#host_variables_parse_type label[class$="hollow"]');
 
         client.expect.element('#host_save_btn').enabled;
         client.click('#host_save_btn');

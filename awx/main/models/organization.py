@@ -10,6 +10,7 @@ from django.db.models import Q
 from django.contrib.auth.models import User
 from django.contrib.sessions.models import Session
 from django.utils.timezone import now as tz_now
+from django.utils.translation import ugettext_lazy as _
 
 
 # AWX
@@ -42,6 +43,12 @@ class Organization(CommonModel, NotificationFieldsModel, ResourceMixin, CustomVi
         'InstanceGroup',
         blank=True,
     )
+    max_hosts = models.PositiveIntegerField(
+        blank=True,
+        default=0,
+        help_text=_('Maximum number of hosts allowed to be managed by this organization.'),
+    )
+
     admin_role = ImplicitRoleField(
         parent_role='singleton:' + ROLE_SINGLETON_SYSTEM_ADMINISTRATOR,
     )
@@ -140,6 +147,7 @@ class Profile(CreatedModifiedModel):
         'auth.User',
         related_name='profile',
         editable=False,
+        on_delete=models.CASCADE
     )
     ldap_dn = models.CharField(
         max_length=1024,
@@ -149,7 +157,9 @@ class Profile(CreatedModifiedModel):
 
 class UserSessionMembership(BaseModel):
     '''
-    A lookup table for session membership given user.
+    A lookup table for API session membership given user. Note, there is a
+    different session created by channels for websockets using the same 
+    underlying model.  
     '''
 
     class Meta:
@@ -175,12 +185,6 @@ class UserSessionMembership(BaseModel):
             .order_by('-created')
         non_expire_memberships = [x for x in query_set if x.session.expire_date > now]
         return non_expire_memberships[settings.SESSIONS_PER_USER:]
-
-    @staticmethod
-    def clear_session_for_user(user):
-        query_set = UserSessionMembership.objects.select_related('session').filter(user=user)
-        sessions_to_delete = [obj.session.pk for obj in query_set]
-        Session.objects.filter(pk__in=sessions_to_delete).delete()
 
 
 # Add get_absolute_url method to User model if not present.

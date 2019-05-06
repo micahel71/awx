@@ -115,6 +115,10 @@ export default ['NotificationsList', 'i18n', function(NotificationsList, i18n) {
                     dataTitle: i18n._('Extra Variables'),
                     dataPlacement: 'right',
                     dataContainer: "body",
+                    subCheckbox: {
+                        variable: 'ask_variables_on_launch',
+                        text: i18n._('Prompt on launch')
+                    },
                     ngDisabled: '!(workflow_job_template_obj.summary_fields.user_capabilities.edit || canAddWorkflowJobTemplate)' // TODO: get working
                 },
                 checkbox_group: {
@@ -135,6 +139,13 @@ export default ['NotificationsList', 'i18n', function(NotificationsList, i18n) {
             },
 
             buttons: { //for now always generates <button> tags
+                launch: {
+                    component: 'at-launch-template',
+                    templateObj: 'workflow_job_template_obj',
+                    ngShow: '(workflow_job_template_obj.summary_fields.user_capabilities.start || canAddWorkflowJobTemplate)',
+                    ngDisabled: 'disableLaunch || workflow_job_template_form.$dirty',
+                    showTextButton: 'true'
+                },
                 cancel: {
                     ngClick: 'formCancel()',
                     ngShow: '(workflow_job_template_obj.summary_fields.user_capabilities.edit || canAddWorkflowJobTemplate)'
@@ -215,7 +226,6 @@ export default ['NotificationsList', 'i18n', function(NotificationsList, i18n) {
             relatedButtons: {
                 view_survey: {
                     ngClick: 'editSurvey()',
-                    awFeature: 'surveys',
                     ngShow: '($state.is(\'templates.addWorkflowJobTemplate\') || $state.is(\'templates.editWorkflowJobTemplate\') || $state.is(\'templates.editWorkflowJobTemplate.workflowMaker\')) && survey_exists && !(workflow_job_template_obj.summary_fields.user_capabilities.edit || canAddWorkflowJobTemplate)',
                     label: i18n._('View Survey'),
                     class: 'Form-primaryButton'
@@ -223,7 +233,6 @@ export default ['NotificationsList', 'i18n', function(NotificationsList, i18n) {
                 add_survey: {
                     ngClick: 'addSurvey()',
                     ngShow: '!survey_exists && ($state.is(\'templates.addWorkflowJobTemplate\') || $state.is(\'templates.editWorkflowJobTemplate\') || $state.is(\'templates.editWorkflowJobTemplate.workflowMaker\'))',
-                    awFeature: 'surveys',
                     awToolTip: '{{surveyTooltip}}',
                     dataPlacement: 'top',
                     label: i18n._('Add Survey'),
@@ -231,7 +240,6 @@ export default ['NotificationsList', 'i18n', function(NotificationsList, i18n) {
                 },
                 edit_survey: {
                     ngClick: 'editSurvey()',
-                    awFeature: 'surveys',
                     ngShow: 'survey_exists && ($state.is(\'templates.addWorkflowJobTemplate\') || $state.is(\'templates.editWorkflowJobTemplate\') || $state.is(\'templates.editWorkflowJobTemplate.workflowMaker\'))',
                     label: i18n._('Edit Survey'),
                     class: 'Form-primaryButton',
